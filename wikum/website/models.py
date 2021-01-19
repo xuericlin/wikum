@@ -2,7 +2,9 @@ from __future__ import unicode_literals
 
 from django.db import models
 from django.contrib.auth.models import User
-from django.utils.encoding import python_2_unicode_compatible
+from pinax.notifications.models import NoticeType
+from six import python_2_unicode_compatible
+from annoying.fields import AutoOneToOneField
 
 # Create your models here.
 
@@ -13,6 +15,12 @@ class Source(models.Model):
 
     def __unicode__(self):
         return self.source_name
+
+class WikumUser(models.Model):
+    user = AutoOneToOneField(User, primary_key=True, on_delete=models.CASCADE)
+    comments_read = models.TextField(blank=True, default="")
+    subscribe_edit = models.TextField(blank=True, default="")
+    subscribe_replies = models.TextField(blank=True, default="")
 
 @python_2_unicode_compatible
 class Article(models.Model):
@@ -31,11 +39,14 @@ class Article(models.Model):
 
     id = models.AutoField(primary_key=True)
     disqus_id = models.CharField(max_length=64, null=True, blank=True)
+    first_child = models.CharField(max_length=70, null=True, blank=True)
+    last_child = models.CharField(max_length=70, null=True, blank=True)
     created_at = models.DateTimeField(null=True)
     title = models.TextField()
     url = models.URLField()
-    source = models.ForeignKey('Source', on_delete=models.CASCADE)
+    source = models.ForeignKey('Source', on_delete=models.PROTECT)
     last_updated = models.DateTimeField(null=True)
+    drag_locked = models.BooleanField(default=False)
 
     num = models.IntegerField(default=0)
     highlight_authors = models.TextField()
@@ -53,7 +64,7 @@ class Article(models.Model):
     # To prevent this, we first grab only the section(not the entire page) using "section_index" and parse it.
     section_index = models.IntegerField(default=0)
 
-    owner = models.ForeignKey(User, null=True, on_delete=models.CASCADE)
+    owner = models.ForeignKey(User, null=True, on_delete=models.PROTECT)
 
     def __str__(self):
         return self.title
@@ -117,6 +128,10 @@ class Comment(models.Model):
     text = models.TextField()
     disqus_id = models.CharField(max_length=70)
     reply_to_disqus = models.CharField(max_length=70, null=True, blank=True)
+    sibling_prev = models.CharField(max_length=70, null=True, blank=True)
+    sibling_next = models.CharField(max_length=70, null=True, blank=True)
+    first_child = models.CharField(max_length=70, null=True, blank=True)
+    last_child = models.CharField(max_length=70, null=True, blank=True)
     num_replies = models.IntegerField(default=0)
     text_len = models.IntegerField(default=0)
     
@@ -204,3 +219,13 @@ class CommentRating(models.Model):
     coverage_rating = models.IntegerField(null=True)
     quality_rating = models.IntegerField(null=True)
 
+
+class Notification(models.Model):
+    recipient = models.ForeignKey(User, related_name="notification_recipient", on_delete=models.CASCADE)
+    sender = models.CharField(max_length=2000, blank=False)
+    date_created = models.DateTimeField(auto_now_add=True, blank=True)
+    notice_type = models.ForeignKey(NoticeType, on_delete=models.CASCADE)
+    seen = models.BooleanField(default=False)
+    url = models.URLField(max_length=300, blank=False, null=True)
+    message = models.CharField(max_length=2000, blank=False, null=True)
+    content = models.CharField(max_length=2000, blank=False, null=True)

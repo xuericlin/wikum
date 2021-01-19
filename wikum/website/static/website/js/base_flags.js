@@ -7,11 +7,17 @@ current_summarize_d_id = [];
 
 var article_url = $('#article_url').text();
 var owner = getParameterByName('owner');
+var unique_user_id = Math.floor(Math.random() * 1000000000);
 var article_id = $('#article_id').text();
+var lastClicked = null;
+var isSortable = true;
+var read_list = [];
+var subscribe_edit_comments = [];
+var subscribe_replies_comments = [];
 
 $(function () {
 	$('[data-toggle="tooltip"]').tooltip()
-})
+});
 
 var idleTime = 0;
 var dids_in_use = [];
@@ -34,6 +40,72 @@ function timerIncrement() {
     	send_update_locks(dids_in_use, false);
     }
 }
+
+function isElementInViewport(el) {
+    // Special bonus for those using jQuery
+    if (typeof jQuery === "function" && el instanceof jQuery) {
+        el = el[0];
+    }
+    var rect = el.getBoundingClientRect();
+    return (
+        rect.top >= 0 &&
+        rect.left >= 0 &&
+        rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) && /* or $(window).height() */
+        rect.right <= (window.innerWidth || document.documentElement.clientWidth) /* or $(window).width() */
+    );
+}
+
+function getCommentsInViewport() {
+	var comments = $('.comment_box').filter(function() {
+	    return isElementInViewport(this);
+	});
+	return comments.map(function() {
+		return $(this).data('did');
+	}).get();
+}
+
+var old_visible;
+var readDelay=5000, setReadConst;
+function onVisibilityChange() {
+	clearTimeout(setReadConst);
+	setReadConst = setTimeout(function() {
+		var visible = getCommentsInViewport();
+	    if (visible != old_visible) {
+	        old_visible = visible;
+	        mark_comments_read(visible);
+	    }
+	}, readDelay);
+}
+
+function mark_comments_read(dids) {
+	var csrf = $('#csrf').text();
+	var logged_in = $("#owner").length > 0;
+	var dids_send = [];
+	if (read_list.length == 0) {
+		dids_send = dids;
+	} else {
+		for (const did of dids) {
+			var unread = $('#outline-text-' + did).hasClass('comment-unread');
+			if (unread && read_list) dids_send.push(did);
+			$('#outline-text-' + did).removeClass('comment-unread');
+		}
+	}
+	var dids_strings = dids_send.map(did => did.toString());
+	read_list = read_list.concat(dids_strings);
+	var data = {csrfmiddlewaretoken: csrf,
+				ids: dids_send};
+	if (logged_in && dids_send.length > 0) {
+		$.ajax({
+			type: 'POST',
+			url: '/mark_comments_read',
+			data: data,
+			success: function(res) {}
+		});
+	}
+}
+
+$(window).on('DOMContentLoaded load resize scroll', onVisibilityChange);
+$('#box').on('scroll', onVisibilityChange);
 
 function highlight_sents() {
 	d_ids = current_summarize_d_id;
@@ -330,11 +402,11 @@ function is_dark(color) {
 	return luminance(color) < 50;
 }
 
-$('#permission_modal_box').on('show.bs.modal', function(e) {
-	if ($("#global-perm-dropdown").text().trim() != "Publicly Editable") {
-		$('.public-edit-perms').hide();
-	}
-});
+// $('#permission_modal_box').on('show.bs.modal', function(e) {
+// 	if ($("#global-perm-dropdown").text().trim() != "Publicly Editable or Commentable") {
+// 		$('.public-edit-perms').hide();
+// 	}
+// });
 
 var ws_scheme = window.location.protocol == "https:" ? "wss" : "ws";
 // TODO: change WebSocket to ReconnectingWebSocket
@@ -342,6 +414,24 @@ var chatsock = new ReconnectingWebSocket(ws_scheme + '://' + window.location.hos
 
 $('#new_node_modal_box').on('show.bs.modal', function(e) {
 	$("#new_node_textarea").val("");
+	$.ajax({
+        url: "/users",
+        type: 'GET',
+        dataType: 'json',
+        success: function(res) {
+            $('#new_node_textarea').textcomplete([{
+			    match: /(^|\s)@([a-z0-9+\-\_]*)$/,
+			    search: function (term, callback) {
+			        callback($.map(res, function (name) {
+			            return name.indexOf(term) === 0 ? name : null;
+			        }));
+			    },
+			    replace: function (name) {
+			        return ' @' + name + ' ';
+			    }
+			}]);
+        }
+    });
 	$.ajax({type: 'GET',
 			url: '/log_data?data=open_new_node_modal',
 			success: function(res) {
@@ -374,20 +464,29 @@ $('#new_node_modal_box').on('show.bs.modal', function(e) {
 	});
 });
 
-$(document).on('mouseover', '.comment_box', function() {
-	$(this).find('footer').css('display', 'block');
-});
-
-$(document).on('mouseleave', '.comment_box', function() {
-	let did = $(this).find('footer a').data('did');
-	if ($('div[data-reply-did="' + did + '"]').is(":visible") == false) {
-		$(this).find('footer').css('display', 'none');
-	}
-});
 
 $('#reply_modal_box').on('show.bs.modal', function(e) {
 	var id = $(e.relatedTarget).data('id');
 	$("#reply_comment_textarea").val('');
+
+	$.ajax({
+        url: "/users",
+        type: 'GET',
+        dataType: 'json',
+        success: function(res) {
+            $('#reply_comment_textarea').textcomplete([{
+			    match: /(^|\s)@([a-z0-9+\-\_]*)$/,
+			    search: function (term, callback) {
+			        callback($.map(res, function (name) {
+			            return name.indexOf(term) === 0 ? name : null;
+			        }));
+			    },
+			    replace: function (name) {
+			        return ' @' + name + ' ';
+			    }
+			}]);
+        }
+    });
 
 	d = nodes_all[id-1];
 	var ids = [];
@@ -470,43 +569,48 @@ $('#evaluate_summary_modal_box').on('show.bs.modal', function(e) {
 	var text = 'Flag this summary as being problematic or exemplary in the below characteristics:';
 	$('#evaluate_text').html(text);
 	
+	var is_summary_box = '';
 	if (d.replace_node) {
 		var node_text = '<strong>Summary Node:</strong><BR>' + render_summary_node(d, false);
+		is_summary_box = 'summary_box';
 	} else if (d.summary != '') {
 		var node_text = '<strong>Summary:</strong> ' + render_summary_node(d, false);
+		node_text += '<P>---</P>';
+		node_text += d.name;
 	} else {
 		var node_text = d.name;
 	}
-			
-	var text = '<div class="summary_box tag_comment_comment" style="border-width:2px;">' + node_text+ '</div>';
 
-	if (d.replace.length > 0) {
-		var children_text = '';
-		for (var i=0; i<d.replace.length; i++) {
-			var summarized = d.replace[i].summarized || d.replace[i].summarized==undefined? "summarized" : "";
-			if (d.replace[i].summary != '') {
-				children_text += `<div id="sum_box_` + d.replace[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.replace[i].id + `</P><strong>Summary: </strong> ` + render_summary_node_edit(d.replace[i]) + `</div>`;
-			} else {
-				current_summarize_d_id.push(d.replace[i].d_id);
+	var text = '<div class="' + is_summary_box + ' tag_comment_comment" style="border-width:2px;">' + node_text+ '</div>';
+	var children_text = '';
+	if (d.replace_node) {
+		if (d.replace.length > 0) {
+			for (var i=0; i<d.replace.length; i++) {
+				var summarized = d.replace[i].summarized || d.replace[i].summarized==undefined? "summarized" : "";
+				if (d.replace[i].summary != '') {
+					children_text += `<div id="sum_box_` + d.replace[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.replace[i].d_id + `</P><strong>Summary: </strong> ` + render_summary_node_edit(d.replace[i]) + `</div>`;
+				} else {
+					current_summarize_d_id.push(d.replace[i].d_id);
 
-				children_text += `<div id="sum_box_` + d.replace[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.replace[i].id + '</P>' + show_comment_text(d.replace[i].name, d.replace[i].id)  + '<P>-- ' + d.replace[i].author + '</P></div>';
+					children_text += `<div id="sum_box_` + d.replace[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.replace[i].d_id + '</P>' + show_comment_text(d.replace[i].name, d.replace[i].id)  + '<P>-- ' + d.replace[i].author + '</P></div>';
+				}
+				children_text = get_subtree_summarize(children_text, d.replace[i], 1, true);
 			}
-			children_text = get_subtree_summarize(children_text, d.replace[i], 1, true);
-		}
 
-	} else if (d.children.length > 0) {
-		var children_text = '';
-		for (var i=0; i<d.children.length; i++) {
-			var summarized = d.children[i].summarized || d.children[i].summarized==undefined? "summarized" : "";
-			if (d.children[i].summary != '') {
-				children_text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.children[i].id + '</P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
-			} else {
+		} else if (d.children.length > 0) {
+			var children_text = '';
+			for (var i=0; i<d.children.length; i++) {
+				var summarized = d.children[i].summarized || d.children[i].summarized==undefined? "summarized" : "";
+				if (d.children[i].summary != '') {
+					children_text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.children[i].d_id + '</P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
+				} else {
 
-				current_summarize_d_id.push(d.children[i].d_id);
+					current_summarize_d_id.push(d.children[i].d_id);
 
-				children_text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.children[i].id + '</P>' + show_comment_text(d.children[i].name, d.children[i].id) + '<P>-- ' + d.children[i].author + '</P></div>';
+					children_text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} "><P>ID: ` + d.children[i].d_id + '</P>' + show_comment_text(d.children[i].name, d.children[i].id) + '<P>-- ' + d.children[i].author + '</P></div>';
+				}
+				children_text = get_subtree_summarize(children_text, d.children[i], 1, true);
 			}
-			children_text = get_subtree_summarize(children_text, d.children[i], 1, true);
 		}
 	}
 
@@ -636,23 +740,24 @@ $('#evaluate_summary_modal_box').on('show.bs.modal', function(e) {
     
     $('#quality_rating').css('background','linear-gradient(to right, red 25%, white 50%, green 100%)');
 
-    var summarized_list_text = 'Summarized list (check to mark as summarized):';
-    summarized_list_text += '<div id="summarized_id_list">';
-    var d_all_children = recurse_get_children(d);
-    for (var i = 0; i < d_all_children.length; i++) {
-		var child = d_all_children[i];
-		if (!child.replace_node) {
-			if (child.summarized == false) {
-				summarized_list_text +='<input type="checkbox" id="check_'+child.id+'" name="'+child.id+'">';
-			} else {
-				summarized_list_text +='<input type="checkbox" id="check_'+child.id+'" name="'+child.id+'" checked>';
+    if (d.replace_node) {
+	    var summarized_list_text = 'Summarized list (check to mark as summarized):';
+	    summarized_list_text += '<div id="summarized_id_list">';
+	    var d_all_children = recurse_get_children(d);
+	    for (var i = 0; i < d_all_children.length; i++) {
+			var child = d_all_children[i];
+			if (!child.replace_node) {
+				if (child.summarized == false) {
+					summarized_list_text +='<input type="checkbox" id="check_'+child.d_id+'" name="'+child.d_id+'">';
+				} else {
+					summarized_list_text +='<input type="checkbox" id="check_'+child.d_id+'" name="'+child.d_id+'" checked>';
+				}
+				summarized_list_text += '<label for="'+child.d_id+'">'+child.d_id+'</label><br>';
 			}
-			summarized_list_text += '<label for="'+child.id+'">'+child.id+'</label><br>';
 		}
+	    summarized_list_text += '</div>';
+	    $('#summarized_children').html(summarized_list_text);
 	}
-    summarized_list_text += '</div>';
-    $('#summarized_children').html(summarized_list_text);
-
 	var did = $(e.relatedTarget).data('did');
 
 	$('#evaluate_summary_modal_box form').off("submit");
@@ -668,17 +773,19 @@ $('#evaluate_summary_modal_box').on('show.bs.modal', function(e) {
 		var to_summarize_dids = [];
 		var to_unsummarize = [];
 		var to_unsummarize_dids = [];
-		for (var i=0; i < d_all_children.length; i++) {
-			if (!d_all_children[i].replace_node) {
-				// checked as summarized and currently unsummarized
-				if ($('#check_' + d_all_children[i].id).is(":checked") && d_all_children[i].summarized==false) {
-					to_summarize.push(d_all_children[i]);
-					to_summarize_dids.push(d_all_children[i].d_id);
-				}
-				// unchecked and currently summarized
-				if (!$('#check_' + d_all_children[i].id).is(":checked") && !d_all_children[i].summarized==false) {
-					to_unsummarize.push(d_all_children[i]);
-					to_unsummarize_dids.push(d_all_children[i].d_id);
+		if (d_all_children) {
+			for (var i=0; i < d_all_children.length; i++) {
+				if (!d_all_children[i].replace_node) {
+					// checked as summarized and currently unsummarized
+					if ($('#check_' + d_all_children[i].d_id).is(":checked") && d_all_children[i].summarized==false) {
+						to_summarize.push(d_all_children[i]);
+						to_summarize_dids.push(d_all_children[i].d_id);
+					}
+					// unchecked and currently summarized
+					if (!$('#check_' + d_all_children[i].d_id).is(":checked") && !d_all_children[i].summarized==false) {
+						to_unsummarize.push(d_all_children[i]);
+						to_unsummarize_dids.push(d_all_children[i].d_id);
+					}
 				}
 			}
 		}
@@ -710,6 +817,7 @@ $('#evaluate_summary_modal_box').on('show.bs.modal', function(e) {
 
 					for (var i=0; i < to_summarize.length; i++) {
 						to_summarize[i].summarized = true;
+						to_summarize[i].collapsed = true;
 						$('#comment_' + to_summarize[i].id).removeClass('unsummarized');
 						// d3.select('#node_' + to_summarize[i].id).style('fill', color);
 					}
@@ -961,11 +1069,10 @@ $('#hide_modal_box').on('show.bs.modal', function(e) {
 		var datas = [];
 		var min_level = 50;
 		var did_str = '';
-		$('.clicked').each(function(index) {
-			var id_clicked = parseInt($(this)[0].id.substring(5), 10);
-			if (id_clicked != 1) {
-				ids.push(id_clicked);
-				var data = nodes_all[id_clicked-1];
+		$('.marker.outline-selected').each(function() {
+			var data = nodes_all.filter(o => o.d_id == this.id.substring(7))[0];
+			if (!data.article) {
+				ids.push(data.id);
 				datas.push(data);
 				dids.push(data.d_id);
 				did_str += data.d_id + ',';
@@ -1048,6 +1155,42 @@ $('#hide_modal_box').on('show.bs.modal', function(e) {
 		} else if (evt.data.type == "hide_all_selected") {
 			data.ids = evt.data.dids;
 			data.node_ids = evt.data.ids;
+
+			var min_level = 50;
+			var objs = [];
+			$('.marker.outline-selected').each(function() {
+				var data = nodes_all.filter(o => o.d_id == this.id.substring(7))[0];
+				if (!data.article) {
+					objs.push(data);
+					if (data.depth < min_level) {
+						min_level = data.depth;
+					}
+				}
+			});
+
+			var children = []
+			lowest_id = 50000;
+			lowest_d = null;
+			highest_id = -1;
+			highest_d = null;
+			for (var i=0; i<objs.length; i++) {
+				if (objs[i].depth == min_level) {
+					children.push(objs[i].d_id);
+					if (objs[i].id < lowest_id) {
+						lowest_id = objs[i].id;
+						lowest_d = objs[i];
+					}
+					if (objs[i].id > highest_id) {
+						highest_id = objs[i].id;
+						highest_d = objs[i];
+					}
+				}
+			}
+			console.log(children);
+			console.log(data.ids);
+			data.children = children;
+			data.first_selected = lowest_d.d_id;
+			data.last_selected = highest_d.d_id;
 			data.type = 'hide_comments';
 			chatsock.send(JSON.stringify(data));
 		} else {
@@ -1123,7 +1266,6 @@ $('#confirm_delete_modal_box').on('click', '.btn-ok', function(e) {
 				comment: '',
 				article: article_id,
 				id: d.d_id};
-			data.node_id = id;
 			data.type = 'delete_comment_summary';
 			chatsock.send(JSON.stringify(data));
 		}
@@ -1146,6 +1288,18 @@ function insert_quote(highlighted_text, did) {
     copy_to_tinyMCE('\n[quote]"' + highlighted_text + '" [[comment_' + did +']] [endquote]\n');
 }
 
+function send_update_drag_locks(to_lock, new_parent_did) {
+	var article_id = $('#article_id').text();
+	var csrf = $('#csrf').text();
+	var lock_data = {csrfmiddlewaretoken: csrf,
+		article: article_id,
+		to_lock: to_lock,
+		new_parent_did: new_parent_did,
+		type: 'update_drag_locks',
+		unique_user_id: unique_user_id};
+	chatsock.send(JSON.stringify(lock_data));
+}
+
 function send_update_locks(dids, to_lock) {
 	var article_id = $('#article_id').text();
 	var csrf = $('#csrf').text();
@@ -1162,6 +1316,7 @@ $('#summarize_modal_box').on('show.bs.modal', function(e) {
 	activeBox = 'summarize';
 
 	var type = $(e.relatedTarget).data('type');
+	$('#empty_warning_single').text('');
 
 	var ids = [];
 	var dids = [];
@@ -1284,8 +1439,12 @@ $('#summarize_modal_box').on('show.bs.modal', function(e) {
 		evt.preventDefault();
 		dids_in_use = [];
 		send_update_locks([did], false);
-		$('#summarize_modal_box').modal('toggle');
 		var comment = $('#summarize_comment_textarea').val().trim();
+		if (comment === '') {
+			$('#empty_warning_single').text('Summary cannot be empty');
+			return false;
+		}
+		$('#summarize_modal_box').modal('toggle');
 		var article_id = $('#article_id').text();
 		var csrf = $('#csrf').text();
 		var data = {csrfmiddlewaretoken: csrf,
@@ -1303,6 +1462,7 @@ $('#summarize_modal_box').on('show.bs.modal', function(e) {
 $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 
 	activeBox = 'summarize_multiple';
+	$('#empty_warning_multiple').text('');
 
 	$("#summarize_multiple_modal_box").css({
 	    'margin-top': function () {
@@ -1351,9 +1511,10 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 
 			var depth = Math.min(objs[i].depth - min_level, 3);
 			var summaryClass = objs[i].replace_node? "summary_box" : "";
+			var summarized = objs[i].summarized? "summarized" : "";
 
 
-			text += `<div id="sum_box_${objs[i].id}" class="summarize_comment_comment ${summaryClass} level${depth}">
+			text += `<div id="sum_box_${objs[i].id}" class="summarize_comment_comment ${summaryClass} ${summarized} level${depth}">
 			<p>ID: ${objs[i].d_id} |`;
 
 			if (objs[i].replace_node) {
@@ -1390,8 +1551,7 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 		$('#summarize_multiple_modal_box').attr('summarize_multiple_modal_box_dids', dids);
 		dids_in_use = dids;
 		send_update_locks(dids, true);
-	} else {
-
+	} else {	
 		var id = $(e.relatedTarget).data('id');
 		var did = $(e.relatedTarget).data('did');
 		
@@ -1410,7 +1570,9 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 		send_update_locks([did], true);
 
 		if (type == "summarize") {
-			var text = '<div id="sum_box_' + d.id + '" class="summarize_comment_comment">';
+			var summaryClass = d.replace_node? "summary_box" : "";
+			var summarized = d.summarized? "summarized" : "";
+			var text = '<div id="sum_box_' + d.id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '">';
 
 			if (d.summary != '') {
 				text += ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d) + '</div>';
@@ -1431,13 +1593,15 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 				if (d.replace.length > 0) {
 					var text = '';
 					for (var i=0; i<d.replace.length; i++) {
+						var summaryClass = d.replace[i].replace_node? "summary_box" : "";
+						var summarized = d.replace[i].summarized? "summarized" : "";
 						if (d.replace[i].summary != '') {
-							text += '<div id="sum_box_' + d.replace[i].id + '" class="summarize_comment_comment"><P>ID: ' + d.replace[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.replace[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.replace[i].d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d.replace[i]) + '</div>';
+							text += '<div id="sum_box_' + d.replace[i].id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '"><P>ID: ' + d.replace[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.replace[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.replace[i].d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d.replace[i]) + '</div>';
 						} else {
 
 							current_summarize_d_id.push(d.replace[i].d_id);
 
-							text += '<div id="sum_box_' + d.replace[i].id + '" class="summarize_comment_comment"><P>ID: ' + d.replace[i].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.replace[i].d_id +');">Cite Comment</a></P>' + show_comment_text(d.replace[i].name, d.replace[i].d_id)  + '<P>-- ' + d.replace[i].author + '</P></div>';
+							text += '<div id="sum_box_' + d.replace[i].id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '"><P>ID: ' + d.replace[i].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.replace[i].d_id +');">Cite Comment</a></P>' + show_comment_text(d.replace[i].name, d.replace[i].d_id)  + '<P>-- ' + d.replace[i].author + '</P></div>';
 						}
 						text = get_subtree_summarize(text, d.replace[i], 1);
 					}
@@ -1445,19 +1609,23 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 				} else if (d.children.length > 0) {
 					var text = '';
 					for (var i=0; i<d.children.length; i++) {
+						var summaryClass = d.children[i].replace_node? "summary_box" : "";
+						var summarized = d.children[i].summarized? "summarized" : "";
 						if (d.children[i].summary != '') {
-							text += '<div id="sum_box_' + d.children[i].id + '" class="summarize_comment_comment"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.children[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
+							text += '<div id="sum_box_' + d.children[i].id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.children[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
 						} else {
 
 							current_summarize_d_id.push(d.children[i].d_id);
 
-							text += '<div id="sum_box_' + d.children[i].id + '" class="summarize_comment_comment"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P>' + show_comment_text(d.children[i].name, d.children[i].d_id) + '<P>-- ' + d.children[i].author + '</P></div>';
+							text += '<div id="sum_box_' + d.children[i].id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P>' + show_comment_text(d.children[i].name, d.children[i].d_id) + '<P>-- ' + d.children[i].author + '</P></div>';
 						}
 						text = get_subtree_summarize(text, d.children[i], 1);
 					}
 				}
 			} else {
-				var text = '<div id="sum_box_' + d.children[0].id + '" class="summarize_comment_comment"><P>ID: ' + d.children[0].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[0].d_id +');">Cite Comment</a></P>' + show_comment_text(d.children[0].name, d.children[0].d_id) + '<P>-- ' + d.children[0].author + '</P></div>';
+				var summaryClass = d.children[0].replace_node? "summary_box" : "";
+				var summarized = d.children[0].summarized? "summarized" : "";
+				var text = '<div id="sum_box_' + d.children[0].id + '" class="summarize_comment_comment ' + summaryClass + ' ' + summarized + '"><P>ID: ' + d.children[0].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[0].d_id +');">Cite Comment</a></P>' + show_comment_text(d.children[0].name, d.children[0].d_id) + '<P>-- ' + d.children[0].author + '</P></div>';
 
 				current_summarize_d_id.push(d.children[0].d_id);
 
@@ -1465,18 +1633,9 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 			}
 
 			if (d.extra_summary != '') {
-				if (article_url.indexOf('wikipedia.org') !== -1) {
-					tinymce.get('summarize_multiple_comment_textarea').setContent(d.sumwiki + '\n----------\n' + d.extrasumwiki);
-				} else {
-					tinymce.get('summarize_multiple_comment_textarea').setContent(d.summary + '\n----------\n' + d.extra_summary);
-				}
+				tinyMCE.activeEditor.setContent(d.summary + '\n----------\n' + d.extra_summary);
 			} else {
-				if (article_url.indexOf('wikipedia.org') !== -1) {
-					tinymce.get('summarize_multiple_comment_textarea').setContent(d.sumwiki);
-				}
-				else {
-					tinymce.get('summarize_multiple_comment_textarea').setContent(d.summary);
-				}
+				tinyMCE.activeEditor.setContent(d.summary);
 			}
 
 			$('#summarize_multiple_comment_text').text('Edit the summary for this entire subtree of comments.');
@@ -1559,8 +1718,15 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 
 	$('#summarize_multiple_modal_box form').submit({data_id: did, id: id, type: type, ids: ids, dids: dids}, function(evt) {
 		evt.preventDefault();
-		$('#summarize_multiple_modal_box').modal('toggle');
+		tinymce.triggerSave();
+
 		var comment = tinyMCE.get('summarize_multiple_comment_textarea').getContent().trim();
+		if (comment === '') {
+			$('#empty_warning_multiple').text('Summary cannot be empty');
+			return false;
+		}
+		$('#summarize_multiple_modal_box').modal('toggle');
+		if (comment)
 		var article_id = $('#article_id').text();
 		var csrf = $('#csrf').text();
 		var data = {csrfmiddlewaretoken: csrf,
@@ -1571,8 +1737,8 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 		};
 
 		if (evt.data.type == "summarize_selected") {
+			document.body.style.cursor='wait';
 			data.ids = evt.data.dids;
-
 			var objs = [];
 			$('.marker.outline-selected').each(function() {
 				var data = nodes_all.filter(o => o.d_id == this.id.substring(7))[0];
@@ -1584,18 +1750,22 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 				}
 			});
 
-			children = [];
 			children_dids = [];
 			lowest_id = 50000;
 			lowest_d = null;
+			highest_id = -1;
+			highest_d = null;
 			size = 0;
 			for (var i=0; i<objs.length; i++) {
 				if (objs[i].depth == min_level) {
-					children.push(objs[i]);
 					children_dids.push(objs[i].d_id);
 					if (objs[i].id < lowest_id) {
 						lowest_id = objs[i].id;
 						lowest_d = objs[i];
+					}
+					if (objs[i].id > highest_id) {
+						highest_id = objs[i].id;
+						highest_d = objs[i];
 					}
 					if (objs[i].size > size) {
 						size = objs[i].size;
@@ -1603,7 +1773,8 @@ $('#summarize_multiple_modal_box').on('show.bs.modal', function(e) {
 				}
 			}
 			data.children = children_dids;
-			data.child = lowest_d.d_id;
+			data.first_selected = lowest_d.d_id;
+			data.last_selected = highest_d.d_id;
 			data.size = size;
 			data.type = "summarize_selected"
 			chatsock.send(JSON.stringify(data));
@@ -1707,6 +1878,64 @@ function downvote_summary(did, id) {
 		});
 }
 
+function show_viz_box_original(select_obj) {
+	if (select_obj['normal'] != undefined) {
+		var d_id = select_obj['normal'];
+		var d = d_id === 'viewAll' ? nodes_all[0] : nodes_all.filter(o => o.d_id == d_id)[0];
+		var outline_item = $('.outline-item#' + d_id);
+		redOutlineBorder(outline_item);
+		show_text(d);
+	} else if (select_obj['ctrl'] != undefined) {
+		// ctrl select
+		var selected_dids = select_obj['ctrl'];
+		if (selected_dids.length == 0) {
+			var outline_item = $('.outline-item#viewAll');
+			//redOutlineBorder(outline_item);
+			show_text(nodes_all[0]);
+		} else {
+			// select outline view markers and text
+			for (const d_id of selected_dids) {
+	    		$('.outline-item#' + d_id).addClass('rb-red');	
+				/* outline the circle */
+				$('#marker-' + d_id).addClass('outline-selected');
+		    }
+		    // show corresponding comment boxes
+			show_text('clicked');
+		}
+	} else {
+		var outline_item = $('.outline-item#viewAll');
+		//redOutlineBorder(outline_item);
+		show_text(nodes_all[0]);
+	}
+}
+
+// return either single d_id (normal select) or list of d_ids (ctrl select)
+function currentOutlineBorder() {
+	var selected = {'normal': undefined, 'ctrl': undefined};
+	if ($('.outline-selected.list-group-line').length > 0) {
+		var list_group_item = $('.outline-selected.list-group-line').first().closest('.list-group-item');
+		if (list_group_item.length == 0) {
+			selected['normal'] = 'viewAll';
+			return selected;
+		}
+		var outline_item = $(list_group_item).find('.outline-item').first();
+		selected['normal'] = outline_item.attr('id');
+		return selected;
+	} else {
+		var selected_dids = [];
+		$('.outline-selected.marker').each(function() {
+    		selected_dids.push(this.id.substring(7));
+		});
+		selected['ctrl'] = selected_dids;
+		return selected
+	}
+}
+
+chatsock.onopen = function(message) {
+	console.log("socket open");
+	$('.freeze').removeClass('freeze');
+};
+
 chatsock.onmessage = function(message) {
     var res = JSON.parse(message.data);
 	if (res.type === 'new_node' || res.type === 'reply_comment') {
@@ -1718,6 +1947,9 @@ chatsock.onmessage = function(message) {
 	else if (res.type === 'update_locks') {
 		handle_channel_update_locks(res);
 	}
+	else if (res.type === 'update_drag_locks') {
+		handle_channel_update_drag_locks(res);
+	}
 	else if (res.type === 'summarize_comment') {
 		handle_channel_summarize_comment(res);
 	}
@@ -1726,6 +1958,9 @@ chatsock.onmessage = function(message) {
 	}
 	else if (res.type === 'summarize_comments') {
 		handle_channel_summarize_comments(res);
+	}
+	else if (res.type === 'move_comments') {
+		handle_channel_move_comments(res);
 	}
 	else if (res.type == 'delete_tags') {
 		handle_channel_delete_tags(res);
@@ -1746,6 +1981,8 @@ chatsock.onmessage = function(message) {
 
 chatsock.onerror = function(message) {
 	console.log("Socket error");
+	$('#viz').addClass('freeze');
+	$('#box').addClass('freeze');
 	if (message.data) {
 		var res = JSON.parse(message.data);
 		if ($("#owner").length && res.user === $("#owner")[0].innerHTML) error_noty();
@@ -1754,6 +1991,7 @@ chatsock.onerror = function(message) {
 
 
 function handle_channel_message(res) {
+	var currentHighlight = currentOutlineBorder();
 	if (res.type === 'new_node') {
 		if (res.comment === 'unauthorized') {
 			unauthorized_noty();
@@ -1761,6 +1999,7 @@ function handle_channel_message(res) {
 			new_d = {d_id: res.d_id,
 				 name: res.comment,
 				 summary: "",
+				 last_updated: res.last_updated,
 				 summarized: false,
 				 extra_summary: "",
 				 parent: nodes_all[0],
@@ -1782,6 +2021,7 @@ function handle_channel_message(res) {
 			new_d = {d_id: res.d_id,
 			          name: res.comment,
 			          summary: "",
+			          last_updated: res.last_updated,
 			          summarized: false,
 			          extra_summary: "",
 			          parent: d,
@@ -1798,29 +2038,32 @@ function handle_channel_message(res) {
 			          y: d.y,
 			          y0: d.y0,
 			         };
-			recurse_expand_all(d);
+			expand(d);
 			insert_node_to_children(new_d, d);
 		}
 	}
-	update(new_d.parent);
+	if (res.type === 'reply_comment' || $('#next_page').length === 0) {
+		update(new_d.parent);
 
-	var text = construct_comment(new_d);
-	$('#comment_' + new_d.d_id).html(text);
-	$('#comment_' + new_d.id).attr('id', 'comment_' + new_d.id);
-	//author_hover();
-	show_text(nodes_all[0]);
-	
-	d3.select("#node_" + new_d.d_id).style("fill",color);
-	if (res.type === 'reply_comment') d3.select('#node_' + d.id).style('fill', color);
+		var text = construct_comment(new_d);
+		$('#comment_' + new_d.d_id).html(text);
+		$('#comment_' + new_d.id).attr('id', 'comment_' + new_d.id);
+		//author_hover();
 
-	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
-		$("#box").scrollTo("#comment_" + new_d.id, 500);
+		if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+			show_text(nodes_all[0]);
+			$("#box").scrollTo("#comment_" + new_d.id, 500);
+			$('#comment_' + new_d.id)
+			  .animate({borderColor:'red'}, 400)
+			  .delay(400)
+			  .animate({borderColor:'hsl(195, 59%, 85%)'}, 1000);
+			highlight_box(new_d.d_id);
+		} else {
+			// show_text(nodes_all[0]);
+			show_viz_box_original(currentHighlight);
+		}
+
 	}
-	$('#comment_' + new_d.id)
-	  .animate({borderColor:'red'}, 400)
-	  .delay(400)
-	  .animate({borderColor:'hsl(195, 59%, 85%)'}, 1000);
-	highlight_box(new_d.d_id);
 	make_progress_bar();
 	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
 }
@@ -1879,7 +2122,6 @@ function handle_channel_tags(res) {
 			for (var i=0; i<list_dids.length; i++) {
 				var tags2 = '' + d_text2;
 				c = nodes_all.filter(o => o.d_id == list_dids[i])[0];
-				console.log(tags);
 				c.tags.push([tag, res.color]);
 				if ($('#tags_' + c.id).html() == "") {
 					$('#tags_' + c.id).html('Tags: ' + tags2);
@@ -1908,6 +2150,7 @@ function handle_channel_update_locks(res) {
 }
 
 function handle_channel_summarize_comment(res) {
+	var currentHighlight = currentOutlineBorder();
 	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
 
 	d = nodes_all.filter(o => o.d_id == res.d_id)[0];
@@ -1929,12 +2172,19 @@ function handle_channel_summarize_comment(res) {
 	d3.select("#node_" + d.id).style("fill",color);
 	$('#comment_' + node_id).addClass("summary");
 
-	highlight_box(node_id);
-	show_text(nodes_all[0]);
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		show_text(nodes_all[0]);
+		highlight_box(node_id);
+	} else {
+		// show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
 	make_progress_bar();
 }
 
 function handle_channel_summarize_selected(res) {
+	document.body.style.cursor='default';
+	var currentHighlight = currentOutlineBorder();
 	let children = [];
 	let children_dids = res.children;
 	for (var i = 0; i < children_dids.length; i++) {
@@ -1943,25 +2193,26 @@ function handle_channel_summarize_selected(res) {
 			children.push(child);
 		}
 	}
-	let lowest_d = nodes_all.filter(o => o.d_id == res.lowest_d)[0];
-	let position = lowest_d.parent.children.indexOf(lowest_d);
+	let highest_d = nodes_all.filter(o => o.d_id == res.highest_d)[0];
+	let position = highest_d.parent.children.indexOf(highest_d) - (children.length - 1);
 	new_d = {d_id: res.d_id,
 			 name: "",
 			 summary: res.top_summary,
+			 last_updated: res.last_updated,
 			 summarized: true,
 			 extra_summary: res.bottom_summary,
-			 parent: lowest_d.parent,
+			 parent: highest_d.parent,
 			 replace: children,
 			 author: "",
 			 tags: [],
-			 collapsed: lowest_d.parent.collapsed,
+			 collapsed: highest_d.parent.collapsed,
 			 replace_node: true,
 			 size: res.size,
-			 depth: lowest_d.depth,
-			 x: lowest_d.x,
-			 x0: lowest_d.x0,
-			 y: lowest_d.y,
-			 y0: lowest_d.y0,
+			 depth: highest_d.depth,
+			 x: highest_d.x,
+			 x0: highest_d.x0,
+			 y: highest_d.y,
+			 y0: highest_d.y0,
 			};
 			
 	if (article_url.indexOf('wikipedia.org') !== -1) {
@@ -1981,8 +2232,6 @@ function handle_channel_summarize_selected(res) {
 		children[d].parent = new_d;
 	}
 
-	insert_node_to_children(new_d, new_d.parent, position);
-
 	delete_summary_nodes = res.delete_summary_node_dids;
 	for (var i=0; i<delete_summary_nodes.length; i++) {
 		let node = nodes_all.filter(o => o.d_id == delete_summary_nodes[i])[0];
@@ -1992,7 +2241,6 @@ function handle_channel_summarize_selected(res) {
 	delete_summary_nodes = [];
 	delete_summary_node_ids = [];
 
-	console.log(new_d.collapsed);
 	if (!new_d.collapsed) {
 		if (new_d.children) {
 			for (var i=0; i<new_d.children.length; i++) {
@@ -2005,46 +2253,42 @@ function handle_channel_summarize_selected(res) {
 			}
 		}
 	}
-
+	insert_node_to_children(new_d, new_d.parent, position);
 	update(new_d.parent);
 
-	show_text(nodes_all[0]);
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		show_text(nodes_all[0]);
+	} else {
+		// show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
 
-	d3.select("#node_" + new_d.id)
-	.style("fill",color);
-
-	var text = '<div id="comment_text_' + new_d.id + '"><strong>Summary Node:</strong><BR>' + render_summary_node(new_d, false) + '</div>';
-	
+	var text = '<div class="comment_text" id="comment_text_' + new_d.id + '"><strong>Summary Node:</strong><BR>' + render_summary_node(new_d, false) + '</div>';
+	text += `<footer align="right">`;
 	if ($('#access_mode').attr('data-access') == "0") {
-		text += `<footer>
-			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#reply_modal_box" data-id="${new_d.id}">Reply</a>
-			<a`;
+		text += `<a data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#reply_modal_box" data-id="${new_d.id}">Reply</a>
+			<a `;
 		if (new_d.is_locked) text += `class="disabled" `;
-		text +=	`data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${new_d.id}">Edit Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${new_d.id}" data-did="${new_d.d_id}">Delete Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${new_d.id}">Evaluate Summary</a>
-		</footer>`;
+		text +=	`data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${new_d.id}">Edit</a>
+			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${new_d.id}" data-did="${new_d.d_id}">Delete</a>
+			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${new_d.id}">Evaluate</a>`;
 	}
 
 	else if ($('#access_mode').attr('data-access') == "1") {
-		text += `<footer>
-			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#reply_modal_box" data-id="${new_d.id}">Reply</a>
-		</footer>`;
+		text += `<a data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#reply_modal_box" data-id="${new_d.id}">Reply</a>`;
 	}
 
 	else if ($('#access_mode').attr('data-access') == "2") {
-		text += `<footer><a`
+		text += `<a `
 		if (new_d.is_locked) text += `class="disabled" `;
-		text +=	`data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${new_d.id}">Edit Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${new_d.id}"  data-did="${new_d.d_id}">Delete Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${new_d.id}">Evaluate Summary</a>
-		`;
+		text +=	`data-toggle="modal" data-backdrop="false" data-did="${new_d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${new_d.id}">Edit</a>
+			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${new_d.id}"  data-did="${new_d.d_id}">Delete</a>
+			<a data-toggle="modal" data-backdrop="false" data-did="${new_d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${new_d.id}">Evaluate</a>`;
 	}
-
-	// TODO(stian8): add options for commenting: Reply
-
+	text += render_subscribe_buttons(new_d.d_id, new_d.replace_node, !new_d.hiddennode);
+	text += '</footer>';
 	for (var i=0; i<children.length; i++) {
-		if (children[i] == lowest_d) {
+		if (children[i] == highest_d) {
 			$('#comment_' + children[i].id).html(text);
 			$('#comment_' + children[i].id).addClass('summary_box');
 			$('#comment_' + children[i].id).attr('id', 'comment_' + new_d.id);
@@ -2058,6 +2302,7 @@ function handle_channel_summarize_selected(res) {
 
 function handle_channel_summarize_comments(res) {
 	// need to make children 
+	var currentHighlight = currentOutlineBorder();
 	let d = nodes_all.filter(o => o.d_id == res.orig_did)[0];
 	let position = d.parent.children.indexOf(d);
 
@@ -2069,6 +2314,7 @@ function handle_channel_summarize_comments(res) {
 			 summarized: true,
 			 replace: [d],
 			 tags: [],
+			 last_updated: res.last_updated,
 			 summary: res.top_summary,
 			 extra_summary: res.bottom_summary,
 			 author: "",
@@ -2141,44 +2387,49 @@ function handle_channel_summarize_comments(res) {
 		 d.sumwiki = res.top_summary_wiki;
 		 d.extrasumwiki = res.bottom_summary_wiki;
 	}
+	d.last_updated = res.last_updated;
 
-	var text = '<div id="comment_text_' + d.id + '"><strong>Summary Node:</strong><BR>' + render_summary_node(d, false) + '</div>';
-	
+	var text = '<div class="comment_text" id="comment_text_' + d.id + '"><strong>Summary Node:</strong><BR>' + render_summary_node(d, false) + '</div>';
+	text += `<footer align="right">`;
 	if ($('#access_mode').attr('data-access') == "0") {
-		text += `<footer>
-			<a data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>
+		text += `<a data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>
 			<a ` 
 		if (d.is_locked) text += `class="disabled" `;
-		text +=	`data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit Summary Node</a>
-			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate Summary</a>
-		</footer>`;
+		text +=	`data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit</a>
+			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete</a>
+			<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate</a>`;
 	}
 
 	else if ($('#access_mode').attr('data-access') == "1") {
-		text += `<footer>
-			<a data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>
-		</footer>`;
+		text += `<a data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>`;
 	}
 
 	else if ($('#access_mode').attr('data-access') == "2") {
-		text += `<footer>
-			<a ` 
+		text += `<a ` 
 		if (d.is_locked) text += `class="disabled" `;
-		text +=	`data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit Summary Node</a>
-			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete Summary</a>
-			<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate Summary</a>
-		</footer>`;
+		text +=	`data-toggle="modal" data-backdrop="false" data-did="${d.id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit</a>
+			<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete</a>
+			<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate</a>`;
 	}
+	text += render_subscribe_buttons(d.d_id, d.replace_node, d.hiddennode);
+	text += `</footer>`;
 
 	$('#comment_' + d.id).html(text);
 
-	highlight_box(d.id);
-	show_text(nodes_all[0]);
-	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
-	make_progress_bar();
 	nodes_all = update_nodes_all(nodes_all[0]);
 	if (res.subtype == "edit_summarize") update(d.parent);
+
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		highlight_box(d.id);
+		show_text(nodes_all[0]);
+		success_noty();
+	} else {
+		show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
+	
+	make_progress_bar();
+	
 }
 
 function handle_channel_delete_tags(res) {
@@ -2226,6 +2477,138 @@ function handle_channel_delete_tags(res) {
 	}
 }
 
+function find_nearest_summary(d) {
+	if (d.article) {
+		return null;
+	}
+	if (d.replace_node) {
+		return d;
+	}
+	var current = d;
+	var nearest_sum = null;
+	while (current.parent && current.parent !== nodes_all[0]) {
+		if (current.parent.replace_node) {
+			nearest_sum = current.parent;
+			break;
+		}
+		current = current.parent;
+	}
+	return nearest_sum;
+}
+
+function handle_channel_move_comments(res) {
+	document.body.style.cursor='default';
+	var currentHighlight = currentOutlineBorder();
+	var dragItem, oldParent, newParent, prevSib;
+	if (res.old_parent_id == 'article') {
+		oldParent = nodes_all[0];
+	}
+	if (res.new_parent_id == 'article') {
+		newParent = nodes_all[0];
+	}
+	for (var i=0; i < nodes_all.length; i++) {
+		var did = nodes_all[i].d_id;
+		if (did == res.node_id) {
+			dragItem = nodes_all[i];
+		}
+		if (!oldParent && did == res.old_parent_id) {
+			oldParent = nodes_all[i];
+		}
+		if (!newParent && did == res.new_parent_id) {
+			newParent = nodes_all[i];
+		}
+		if (did == res.prev_sib_id) {
+			prevSib = nodes_all[i];
+		}
+	}
+
+	var index = -1;
+	if (dragItem.parent.children && dragItem.parent.children.length){
+		index = dragItem.parent.children.indexOf(dragItem);
+		if (index > -1) {
+	        dragItem.parent.children.splice(index, 1);
+	    }
+	} else if (dragItem.parent._children && dragItem.parent._children.length) {
+		index = dragItem.parent._children.indexOf(dragItem);
+		if (index > -1) {
+	        dragItem.parent._children.splice(index, 1);
+	    }
+	} else if (dragItem.parent.replace && dragItem.parent.replace.length) {
+		index = dragItem.parent.replace.indexOf(dragItem);
+		if (index > -1) {
+	        dragItem.parent.replace.splice(index, 1);
+	    }
+	}
+
+    dragItem.parent = newParent;
+	old_nearest_sum = find_nearest_summary(oldParent)
+	new_nearest_sum = find_nearest_summary(newParent)
+    if (!dragItem.replace_node && old_nearest_sum !== new_nearest_sum) {
+    	mark_children_unsummarized(dragItem);
+    }
+
+    var notCollapsedSummary = !newParent.replace || (newParent.replace && !newParent.replace.length);
+    var notCollapsedComment = !newParent._children || (newParent._children && !newParent._children.length);
+    if (typeof newParent.children !== 'undefined' || typeof newParent._children !== 'undefined') {
+        if (typeof newParent.children !== 'undefined' && notCollapsedComment && notCollapsedSummary) {
+        	// check that the length of replace and _children are 0
+        	insert_node_to_children(dragItem, newParent, res.position);
+        } else if (newParent.replace_node) {
+        	insert_node_to_replace(dragItem, newParent, res.position);
+        } else {
+        	insert_node_to_un_children(dragItem, newParent, res.position);
+        }
+    } else {
+    	if (newParent.replace_node) {
+    		insert_node_to_replace(dragItem, newParent, res.position);
+    	} else {
+    		newParent.children = [];
+        	newParent.children.push(dragItem);
+    	}
+    }
+    // Make sure that the node being added to is expanded so user can see added node is correctly moved
+    //expand(newParent);
+
+    dragItem.x0 = 0;
+	dragItem.y0 = 0;
+	update(oldParent);
+	update(newParent);
+	
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		success_noty();
+		show_text(newParent);
+	} else {
+		// show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
+}
+
+function handle_channel_update_drag_locks(res) {
+	var currentHighlight = currentOutlineBorder();
+	if (res.enable == 'enable' || parseInt(res.unique_user_id) == -1) {
+		isSortable = true;
+		update(nodes_all[0]);
+		console.log("drag enabled");
+		if (parseInt(res.unique_user_id) != unique_user_id) {
+			show_viz_box_original(currentHighlight);
+		} else {
+			var new_parent_did = res.new_parent_did;
+			var new_parent = nodes_all[0];
+			if (new_parent_did != -1) {
+				new_parent = nodes_all.filter(o => o.d_id == new_parent_did)[0];
+			}
+			show_text(new_parent);
+		}
+	} else {
+		if (parseInt(res.unique_user_id) != unique_user_id) {
+			isSortable = false;
+			update(nodes_all[0]);
+			console.log("drag disabled");
+			show_viz_box_original(currentHighlight);
+		}
+	}
+}
+
 function handle_channel_delete_comment_summary(res) {
 	let id = nodes_all.filter(o => o.d_id == res.d_id)[0].id;
 	delete_comment_summary(id);
@@ -2234,32 +2617,44 @@ function handle_channel_delete_comment_summary(res) {
 }
 
 function handle_channel_hide_comment(res) {
+	var currentHighlight = currentOutlineBorder();
 	let d = nodes_all.filter(o => o.d_id == res.d_id)[0];
 	let id = d.id;
-	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
 	$('#comment_' + id).remove();
 	delete_summary_node(id);
-	show_text(nodes_all[0]);
 	if (!d.replace_node) hide_node(id);
 	make_progress_bar();
 	update(d.parent);
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		success_noty();
+		show_text(nodes_all[0]);
+	} else {
+		//show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
 }
 
 function handle_channel_hide_comments(res) {
+	var currentHighlight = currentOutlineBorder();
 	let dids = res.dids;
-	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
 	for (var i = 0; i < dids.length; i++) {
 		let id = nodes_all.filter(o => o.d_id == dids[i])[0].id;
 		$('#comment_' + id).remove();
 		hide_node(id);
 	}
-	show_text(nodes_all[0]);
 	make_progress_bar();
 	update(nodes_all[0]);
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		show_text(nodes_all[0]);
+		success_noty();
+	} else {
+		// show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
 }
 
 function handle_channel_hide_replies(res) {
-	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) success_noty();
+	var currentHighlight = currentOutlineBorder();
 
 	let d = nodes_all.filter(o => o.d_id == res.d_id)[0];
 
@@ -2284,6 +2679,13 @@ function handle_channel_hide_replies(res) {
 	}
 	make_progress_bar();
 	update(d);
+	if ($("#owner").length && res.user === $("#owner")[0].innerHTML) {
+		show_text(nodes_all[0]);
+		success_noty();
+	} else {
+		// show_text(nodes_all[0]);
+		show_viz_box_original(currentHighlight);
+	}
 }
 
 function get_upvote_downvote(id) {
@@ -2365,21 +2767,15 @@ function delete_summary_node(id) {
 
 		//change node's children's parent
 		if (d.replace) {
-			for (var i=0; i<d.replace.length; i++) {
-				d.replace[i].parent = parent;
-				insert_node_to_children(d.replace[i], parent, position);
-			}
+			if (d.replace.length > 1) insert_nodelist_to_children(d.replace, parent, position);
+			else if (d.replace.length == 1) insert_node_to_children(d.replace[0], parent, position);
 		}
 		if (d.children) {
-			for (var i=0; i<d.children.length; i++) {
-				d.children[i].parent = parent;
-				insert_node_to_children(d.children[i], parent, position);
-			}
+			if (d.children.length > 1) insert_nodelist_to_children(d.children, parent, position);
+			else if (d.children.length == 1) insert_node_to_children(d.children[0], parent, position);
 		} else if (d._children) {
-			for (var i=0; i<d._children.length; i++) {
-				d._children[i].parent = parent;
-				insert_node_to_children(d._children[i], parent, position);
-			}
+			if (d._children.length > 1) insert_nodelist_to_children(d._children, parent, position);
+			else if (d._children.length == 1) insert_node_to_children(d._children[0], parent, position);
 		}
 	}
 
@@ -2436,6 +2832,24 @@ function cascade_collapses(d) {
 	}
 }
 
+function insert_nodelist_to_children(node_list, node_parent, position = undefined) {
+	added = false;
+	if (!node_parent.children) {
+		node_parent.children = [];
+	}
+	if (node_parent.children) {
+		if (position !== undefined && position <= node_parent.children.length) {
+			node_parent.children.splice(position, 0, ...node_list);
+			added = true;
+		}
+
+		if (!added) {
+			node_parent.children.concat(node_list);
+		}
+
+	}
+}
+
 function insert_node_to_children(node_insert, node_parent, position = undefined) {
 	added = false;
 	if (!node_parent.children) {
@@ -2453,7 +2867,7 @@ function insert_node_to_children(node_insert, node_parent, position = undefined)
 
 	} else if (node_parent.replace) {
 		if (position !== undefined && position <= node_parent.replace.length) {
-			node_parent.children.splice(position, 0, node_insert);
+			node_parent.replace.splice(position, 0, node_insert);
 			added = true;
 		}
 
@@ -2466,31 +2880,39 @@ function insert_node_to_children(node_insert, node_parent, position = undefined)
 
 
 
-function insert_node_to_un_children(node_insert, node_parent) {
+function insert_node_to_un_children(node_insert, node_parent, position = undefined) {
 	added = false;
-	for (var i=0; i<node_parent._children.length; i++) {
-		if (node_parent._children[i].size < node_insert.size) {
-			node_parent._children.splice(i, 0, node_insert);
-			added = true;
-			break;
-		}
+	if (!node_parent._children) {
+		node_parent._children = [];
 	}
-	if (!added) {
-		node_parent._children.push(node_insert);
+	if (node_parent._children) {
+		if (position !== undefined && position <= node_parent._children.length) {
+			node_parent._children.splice(position, 0, node_insert);
+			added = true;
+		}
+
+		if (!added) {
+			node_parent._children.push(node_insert);
+		}
+
 	}
 }
 
-function insert_node_to_replace(node_insert, node_parent) {
+function insert_node_to_replace(node_insert, node_parent, position = undefined) {
 	added = false;
-	for (var i=0; i<node_parent.replace.length; i++) {
-		if (node_parent.replace[i].size < node_insert.size) {
-			node_parent.replace.splice(i, 0, node_insert);
-			added = true;
-			break;
-		}
+	if (!node_parent.replace) {
+		node_parent.replace = [];
 	}
-	if (!added) {
-		node_parent.replace.push(node_insert);
+	if (node_parent.replace) {
+		if (position !== undefined && position <= node_parent.replace.length) {
+			node_parent.replace.splice(position, 0, node_insert);
+			added = true;
+		}
+
+		if (!added) {
+			node_parent.replace.push(node_insert);
+		}
+
 	}
 }
 
@@ -2551,13 +2973,13 @@ function get_subtree_summarize(text, d, level, eval=false) {
 				if (d.children[i].replace_node) {
 					if (eval){
 						console.log(d.children[i]);
-						text += '<div id="sum_box_' + d.children[i].id + '" class="summary_box summarize_comment_comment level' + lvl + '"><P>ID: ' + d.children[i].id + '</P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d.children[i]) + '</div>';
+						text += '<div id="sum_box_' + d.children[i].id + '" class="summary_box summarize_comment_comment level' + lvl + '"><P>ID: ' + d.children[i].d_id + '</P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d.children[i]) + '</div>';
 					} else {
 						text += '<div id="sum_box_' + d.children[i].id + '" class="summary_box summarize_comment_comment level' + lvl + '"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary_node(' + d.children[i].id + ');">Promote Summary</a> | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.children[i].id + ');">Copy Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Summary</a></P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d.children[i]) + '</div>';
 					}
 				} else {
 					if (eval) {
-						text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].id + '</P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
+						text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].d_id + '</P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
 					} else {
 						text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d.children[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P><strong>Summary: </strong> ' + render_summary_node_edit(d.children[i]) + '</div>';
 					}
@@ -2566,7 +2988,7 @@ function get_subtree_summarize(text, d, level, eval=false) {
 
 				current_summarize_d_id.push(d.children[i].d_id);
 				if (eval) {
-					text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].id + '</P>' + show_comment_text(d.children[i].name, d.children[i].d_id) + '<P>-- ' + d.children[i].author + '</P></div>';
+					text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].d_id + '</P>' + show_comment_text(d.children[i].name, d.children[i].d_id) + '<P>-- ' + d.children[i].author + '</P></div>';
 				} else {
 					text += '<div id="sum_box_' + d.children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d.children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="cite_comment(' + d.children[i].d_id +');">Cite Comment</a></P>' + show_comment_text(d.children[i].name, d.children[i].d_id) + '<P>-- ' + d.children[i].author + '</P></div>';
 				}
@@ -2582,14 +3004,14 @@ function get_subtree_summarize(text, d, level, eval=false) {
 			if (d._children[i].summary != '' || d._children[i].summary != '') {
 				if (d._children[i].replace_node) {
 					if (eval) {
-						text += '<div id="sum_box_' + d._children[i].id + '" class="summarize_comment_comment summary_box level' + lvl + '"><P>ID: ' + d._children[i].id + '</P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d._children[i]) + '</div>';
+						text += '<div id="sum_box_' + d._children[i].id + '" class="summarize_comment_comment summary_box level' + lvl + '"><P>ID: ' + d._children[i].d_id + '</P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d._children[i]) + '</div>';
 					} else {
 						text += '<div id="sum_box_' + d._children[i].id + '" class="summarize_comment_comment summary_box level' + lvl + '"><P>ID: ' + d._children[i].d_id + ' | <a class="btn-xs" btn-edit onclick="copy_summary_node(' + d._children[i].id + ');">Promote Summary</a> | <a class="btn-xs" btn-edit onclick="copy_summary(' + d._children[i].id + ');">Copy Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d._children[i].d_id +');">Cite Summary</a></P><strong>Summary Node:</strong><BR>' + render_summary_node_edit(d._children[i]) + '</div>';
 					}
 					
 				} else {
 					if (eval) {
-						text += '<div id="sum_box_' + d._children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d._children[i].id + '</P><strong>Summary:</strong> ' + render_summary_node_edit(d._children[i]) + '</div>';
+						text += '<div id="sum_box_' + d._children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d._children[i].d_id + '</P><strong>Summary:</strong> ' + render_summary_node_edit(d._children[i]) + '</div>';
 					} else {
 						text += '<div id="sum_box_' + d._children[i].id + `" class="summarize_comment_comment ${summarized} level` + lvl + '"><P>ID: ' + d._children[i].d_id + ' | <a class="btn-xs btn-edit" onclick="copy_summary(' + d._children[i].id + ');">Copy Entire Summary</a> | <a class="btn-xs btn-edit" onclick="cite_comment(' + d._children[i].d_id +');">Cite Comment</a></P><strong>Summary:</strong> ' + render_summary_node_edit(d._children[i]) + '</div>';
 					}
@@ -2696,35 +3118,48 @@ function open_comment_hyperlink(id, d_id, para) {
 			$("#box").scrollTo("#comment_" + child.id, 500);
 		}
 
-		history.pushState(null, "", `#comment_${child.id}`)
+		history.pushState(null, "", `#comment_${child.d_id}`)
 	}
 }
 
 function load_permalink() {
-	var comment = $(location.hash);
-
+	comment = location.hash;
 	if (comment.length) {
-		$("#box").scrollTo(comment, 500);
+		var did = comment.substring(9);
+		if ($('.comment_box[data-did=' + did + ']').length) {
+			$("#box").scrollTo('.comment_box[data-did=' + did + ']', 500);
+		} else {
+			if (nodes_all) {
+				let d = nodes_all.filter(o => o.d_id == did)[0];
+				show_text(nodes_all[0]);
+				let parent = find_nearest_visible_parent(d);
+				open_comment_hyperlink(parent.id, did);
+			}
+		}
 	}
 	else if (location.hash) {
-		var id = (location.hash.match(/comment_(\d+)/) || [])[1];
-
-		if (id) {
-			$(`#node_${id}`).d3Click();
-		}
-
+		var d_id = (location.hash.match(/comment_(\d+)/) || [])[1];
 	}
-	else {
-		$("#node_2").d3Click();
+}
+
+function find_nearest_visible_parent(d) {
+	if ($('.comment_box[data-did=' + d.d_id + ']').is( ":visible" )) {
+		return d;
+	} else {
+		if (d.parent !== undefined) {
+			return find_nearest_visible_parent(d.parent);
+		} else {
+			return null;
+		}
 	}
 }
 
 $(window).bind("hashchange popstate", load_permalink);
 
 // Make permalinks work when page is loaded
-if (location.hash) {
-	$(load_permalink);
-}
+// if (location.hash) {
+// 	$(load_permalink);
+// }
 
 // $(...).click() fails on d3 nodes
 jQuery.fn.d3Click = function () {
@@ -3092,50 +3527,50 @@ function make_filter() {
 	});
 }
 
-function update_global_edit_perm() {
-	var csrf = $('#csrf').text();
-	var article_id = $('#article_id').text();
-	var perms = [];
-    $.each($("input[name='perms']:checked"), function(){            
-        perms.push($(this).val());
-    });
-    var edit_type = "";
-    if (perms.length == 2) {
-    	edit_type = "Publicly Editable";
-    } else if (perms.length == 1) {
-    	if (perms[0] == "comment") {
-    		edit_type = "Publicly Commentable";
-    	} else {
-    		edit_type = "Publicly Summarizable";
-    	}
-    } else {
-    	// unchecking both defaults to Publicly Viewable
-    	edit_type = "Publicly Viewable";
-    	$("#global-perm-dropdown").html(edit_type + ' <span class="caret"></span>');
-    	$('.public-edit-perms').hide();
-    }
+// function update_global_edit_perm() {
+// 	var csrf = $('#csrf').text();
+// 	var article_id = $('#article_id').text();
+// 	// var perms = [];
+//  //    $.each($("input[name='perms']:checked"), function(){            
+//  //        perms.push($(this).val());
+//  //    });
+//     var edit_type = "";
+//     if (perms.length == 2) {
+//     	edit_type = "Publicly Editable and Commentable";
+//     } else if (perms.length == 1) {
+//     	if (perms[0] == "comment") {
+//     		edit_type = "Publicly Commentable";
+//     	} else {
+//     		edit_type = "Publicly Editable";
+//     	}
+//     } else {
+//     	// unchecking both defaults to Publicly Viewable
+//     	edit_type = "Publicly Viewable";
+//     	$("#global-perm-dropdown").html(edit_type + ' <span class="caret"></span>');
+//     	// $('.public-edit-perms').hide();
+//     }
 
-	var data = {
-		csrfmiddlewaretoken: csrf,
-		access: edit_type,
-		article: article_id,
-		owner: owner,
-		};
-	$.ajax({
-			type: 'POST',
-			url: '/add_global_perm',
-			data: data,
-			success: function(res) {
-				success_noty();
-				$('#access_mode').text(edit_type + ' | Share');
-				// no need to update access_level for the owner
-				// only owner can change global perms
-			},
-			error: function() {
-				error_noty();
-			}
-	});
-}
+// 	var data = {
+// 		csrfmiddlewaretoken: csrf,
+// 		access: edit_type,
+// 		article: article_id,
+// 		owner: owner,
+// 		};
+// 	$.ajax({
+// 			type: 'POST',
+// 			url: '/add_global_perm',
+// 			data: data,
+// 			success: function(res) {
+// 				success_noty();
+// 				$('#access_mode').text(edit_type + ' | Share');
+// 				// no need to update access_level for the owner
+// 				// only owner can change global perms
+// 			},
+// 			error: function() {
+// 				error_noty();
+// 			}
+// 	});
+// }
 
 function add_global_perm(access) {
 	var csrf = $('#csrf').text();
@@ -3157,15 +3592,6 @@ function add_global_perm(access) {
 				// no need to update access_level for the owner
 				// only owner can change global perms
 				$('#access_mode').text(access + ' | Share');
-				if (access == "Publicly Editable") {
-					$('.public-edit-perms').show();
-					$('#global-perm-comment').prop('checked', true);
-					$('#global-perm-summarize').prop('checked', true);
-				} else if (access == "Publicly Viewable") {
-					$('.public-edit-perms').hide();
-				} else if (access == "Private Access") {
-					$('.public-edit-perms').hide();
-				}
 			},
 			error: function() {
 				error_noty();
@@ -3198,9 +3624,9 @@ function add_user_perm(username, access, delete_perm, delete_row) {
 					var text = '<tr><td>' + username + '</td><td>';
 					text += '<div class="btn-group"><button type="button" class="btn btn-default btn-xs dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">';
 					text += access + '<span class="caret"></span></button>';
-					text += '<ul class="dropdown-menu permission-menu"><li><a href="#">Full Edit Access</a></li>';
+					text += '<ul class="dropdown-menu permission-menu"><li><a href="#">Full Edit and Comment Access</a></li>';
 					text += '<li><a href="#">Comment Access</a></li>';
-					text += '<li><a href="#">Summarize Access</a></li>';
+					text += '<li><a href="#">Edit Access</a></li>';
 					text += '<li><a href="#">View Access</a></li></ul></div>';
 					text += '<td><button type="button" class="btn btn-default btn-xs btn-success update_user_perm">Update</button>';
 					text += '</td><td><button type="button" class="btn btn-default btn-xs btn-danger delete_user_perm">Delete</button></td></tr>';
@@ -3270,9 +3696,9 @@ function make_username_typeahead() {
 			$(this).parent().parent().prev().html($(this).text() + ' <span class="caret"></span>');
 	   });
 
-		$(".public-edit-perms input").click(function(){
-			update_global_edit_perm();
-		});
+		// $(".public-edit-perms input").click(function(){
+		// 	update_global_edit_perm();
+		// });
 	   
 	   $('.update_user_perm').click(function(){
 	   		var username = $(this).parent().prev().prev().first().html();
@@ -3405,88 +3831,109 @@ function expand_all(id) {
 	show_text(d);
 }
 
-function setSortables() {
-	var nestedSortables = document.getElementsByClassName("nested-sortable");
-	// Loop through each nested sortable element
-	for (var i = 0; i < nestedSortables.length; i++) {
-		if (nestedSortables[i].id !== 'nestedOutline') {
-			new Sortable(nestedSortables[i], {
-				group: 'nested',
-				animation: 150,
-				fallbackOnBody: true,
-				swapThreshold: 0.65,
-				onStart: function(evt) {
-					$('#expand').hide();
-				},
-				onEnd: function (evt) {
-			        var dragItem, newParent;
-			        let outlineItem = $(evt.item).find('.outline-item').get(0);
-			        if (outlineItem) dragItem = nodes_all.filter(o => o.d_id == outlineItem.id)[0];
-			        let ns = $(evt.to).closest('.nested-sortable');
-			        let outlineParent = ns.parent().find('.outline-item').get(0);
-			        if (outlineParent) {
-			        	if (outlineParent.id === 'viewAll') {
-			        		newParent = nodes_all[0];
-			        	} else {
-			        		newParent = nodes_all.filter(o => o.d_id == outlineParent.id)[0];
-			        	}
-			        } 
-			        console.log(dragItem);
-			        console.log(newParent);
-			        if (dragItem && newParent) save_node_position(dragItem, newParent);
-			        // update(draggingNode.parent);
-			    }
-			});
+function setSortables(disabled = false) {
+	var edit_mode = $('#access_mode').attr('data-access') == "0" || $('#access_mode').attr('data-access') == "2";
+	if (sort == 'default' && edit_mode && filter == '') {
+		sortableList = [];
+		var nestedSortables = document.getElementsByClassName("nested-sortable");
+		// Loop through each nested sortable element
+		for (var i = 0; i < nestedSortables.length; i++) {
+			var markerlist = $(nestedSortables[i]).find('.marker');
+			var is_hidden = false;
+			if (markerlist.length) {
+				is_hidden = $($(nestedSortables[i]).find('.marker')[0]).hasClass('m-hidden');
+			}
+			
+			if (nestedSortables[i].id !== 'nestedOutline' && is_hidden == false) {
+				var sortableItem = new Sortable(nestedSortables[i], {
+					group: 'nested',
+					direction: 'vertical',
+					animation: 150,
+					disabled: disabled,
+					fallbackOnBody: true,
+					swapThreshold: 0.65,
+					onStart: function (evt) {
+						$('#expand').hide();
+						send_update_drag_locks(true, -1);
+					},
+					// onMove: function (evt) {
+					// 	$('.outline-item').hover(
+					// 		  function() {
+					// 		    var did = this.id;
+					// 		    extra_highlight_node(did, id);
+					// 		    setTimeoutConst = setTimeout(function() {
+					// 				$('#viz').scrollTo('#outline-text-' + did, 500, {axis: 'y'});
+					// 			}, delay);
+					// 		  }, function() {
+					// 		    var did = parseInt(this.dataset.did);
+					// 		    var id = parseInt(this.id.substring(8));
+					// 		    unextra_highlight_node(did, id);
+					// 		    clearTimeout(setTimeoutConst);
+					// 		  }
+					// 	);
+					// },
+					onEnd: function (evt) {
+				        var dragItem, newParent;
+				        let outlineItem = $(evt.item).find('.outline-item').get(0);
+				        var siblingBefore = $(outlineItem).closest('.list-countainer').prev('.list-countainer').find('.outline-item').get(0);
+				        var siblingAfter = $(outlineItem).closest('.list-countainer').next('.list-countainer').find('.outline-item').get(0);
+				        if (outlineItem) dragItem = nodes_all.filter(o => o.d_id == outlineItem.id)[0];
+				        let ns = $(evt.to).closest('.nested-sortable');
+				        let outlineParent = ns.parent().find('.outline-item').get(0);
+				        if (outlineParent) {
+				        	if (outlineParent.id === 'viewAll') {
+				        		newParent = nodes_all[0];
+				        	} else {
+				        		newParent = nodes_all.filter(o => o.d_id == outlineParent.id)[0];
+				        	}
+				        }
+				        var itemMoved = !(evt.to === evt.from && evt.oldIndex === evt.newIndex);
+				        if (dragItem && newParent && itemMoved) {
+				        	save_node_position(dragItem, newParent, siblingBefore, siblingAfter, evt.newIndex);
+				        }
+				        // update(draggingNode.parent);
+				        let newParentId = newParent == nodes_all[0]? -1 : newParent.d_id;
+				        send_update_drag_locks(false, newParentId);
+				    }
+				});
+				sortableList.push(sortableItem);
+			}
 		}
 	}
 }
 
-function save_node_position(dragItem, newParent) {
+function save_node_position(dragItem, newParent, siblingBefore, siblingAfter, position) {
 
 	var csrf = $('#csrf').text();
 	data = {csrfmiddlewaretoken: csrf,
-			new_parent: newParent.d_id,
-			node: dragItem.d_id};
+			node: dragItem.d_id,
+			type: 'move_comments',
+			position: position};
+	if (newParent.article) {
+		data.new_parent = 'article';
+	} else {
+		data.new_parent = newParent.d_id;
+	}
+	if (siblingBefore) {
+		data.sibling_before = siblingBefore.id;
+	} else {
+		data.sibling_before = 'None';
+	}
 
-	$.ajax({
-		type: 'POST',
-		url: '/move_comments',
-		data: data,
-		success: function(res) {
+	if (siblingAfter) {
+		data.sibling_after = siblingAfter.id;
+	} else {
+		data.sibling_after = 'None';
+	}
 
+	if ([data.new_parent.toString(), data.sibling_before.toString(), data.sibling_after.toString()].includes(dragItem.d_id.toString())) {
+		console.log("problematic drag");
+		return;
+	}
 
-			// now remove the element from the parent, and insert it into the new elements children
-	        var index = dragItem.parent.children.indexOf(dragItem);
-	        if (index > -1) {
-	            dragItem.parent.children.splice(index, 1);
-	        }
-	        dragItem.parent = newParent;
-	        if (typeof newParent.children !== 'undefined' || typeof newParent._children !== 'undefined') {
-	            if (typeof newParent.children !== 'undefined') {
-	            	insert_node_to_children(dragItem, newParent);
-	            } else {
-	            	insert_node_to_un_children(dragItem, newParent);
-	            }
-	        } else {
-	        	if (newParent.replace_node) {
-	        		insert_node_to_replace(dragItem, newParent);
-	        	} else {
-	        		newParent.children = [];
-	            	newParent.children.push(dragItem);
-	        	}
-	        }
-	        // Make sure that the node being added to is expanded so user can see added node is correctly moved
-	        //expand(newParent);
+	document.body.style.cursor='wait';
 
-	        dragItem.x0 = 0;
-			dragItem.y0 = 0;
-
-			success_noty();
-		},
-		error: function() {
-			error_noty();
-		}
-	});
+	chatsock.send(JSON.stringify(data));
 }
 
 function count_children(d) {
@@ -3517,19 +3964,28 @@ function check_clicked_node(d, clicked_ids) {
 }
 
 function getState(d) {
-	let state = 'unsum_comment';
-	if (d.replace_node) {
-		if (has_unsummarized_children(d)) {
-			state = 'summary_partial';
-		} else {
-			state = 'summary';
+	if (filter == '') {
+		var state = 'unsum_comment';
+		if (d.replace_node) {
+			if (has_unsummarized_children(d)) {
+				state = 'summary_partial';
+			} else {
+				state = 'summary';
+			}
+		} else if (d.hiddennode) {
+			state = 'hidden';
+		} else if (d.collapsed) {
+			state = 'sum_comment';
+			if (d.summarized!=null && !d.summarized) {
+				state = 'unsum_comment';
+			}
 		}
-	} else if (d.hiddennode) {
-		state = 'hidden';
-	} else if (d.collapsed && !(d.summarized == false)) {
-		state = 'sum_comment';
+	} else {
+		var state = 'gray';
+		if (filterMatch(d)) {
+			state = 'highlighted';
+		}
 	}
-	// todo: improve speed of summary_partial
 	return state;
 }
 
@@ -3541,31 +3997,51 @@ function stripHtml(text) {
 
 function shorten(text, max_length) {
   if (text.length <= max_length) return text;
-  return text.substr(0, text.lastIndexOf(' ', max_length));
+  if (text.lastIndexOf(' ', max_length) == -1) {
+  	return text.substr(0, max_length);
+  } else {
+  	return text.substr(0, text.lastIndexOf(' ', max_length));
+  }
 }
 
 function setMaxLength(depth) {
-	if (depth < 4) {
-		return 40;
-	} else if (4 <= depth && depth < 6) {
-		return 30;
-	} else {
-		return 20;
-	}
+	return Math.max(50 - depth * 5, 20);
 }
 
-function createOutlineInsideString(d, outline='', depth=1) {
+function filterMatch(d) {
+	if (filter.substring(0, 4) == 'Tag:') {
+		var d_tags = d.tags.map(tag => tag[0]);
+		if (d_tags.includes(filter.substring(5))) {
+			return true;
+		}
+	} else if (filter.substring(0, 5) == 'User:') {
+		if (d.author == filter.substring(6)) {
+			return true
+		}
+	} else {
+		if (d.name.includes(filter)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function createOutlineInsideString(d, outline='', depth=0, shouldExpand=false) {
 	/** type (for coloring):
 	  *  comment = normal comment
 	  *  unsum = unsummarized comment under a summary node
 	  *	 summary = summary
 	  *  psum = partially summarized comment
 	  */
-	if (d.children && d.children.length) {
+	var noArrow = !shouldExpand;
+	if (noArrow) {
 		outline += `<div class="list-group nested-sortable">`;
+	}
+	if (d.children && d.children.length) {
 		for (var i=0; i<d.children.length; i++) {
 			var node = d.children[i];
 			var maxLength = setMaxLength(depth);
+			if (node.depth) maxLength = setMaxLength(node.depth - 1);
 			let title = node.summary? shorten(stripHtml(node.summary), maxLength) : shorten(stripHtml(node.name), maxLength);
 			let state = getState(node);
 			outline += `<div class="list-countainer">`;
@@ -3579,43 +4055,32 @@ function createOutlineInsideString(d, outline='', depth=1) {
 						userColor = stringToColour(node.author);
 					}
 					outline += `style="background-color:${userColor};"`;
-				} 
+				}
+				var not_read = '';
+				if (read_list.length > 0 && $("#owner").length > 0) {
+					not_read = (read_list.indexOf(node.d_id.toString()) >= 0 || $("#owner")[0].innerHTML == node.author)? '' : 'comment-unread';
+				}
 				outline	+= `></span>`
-						+ `<span class="outline-text t-${state}" id="outline-text-${node.d_id}">`
+						+ `<span class="${not_read} outline-text t-${state}" id="outline-text-${node.d_id}">`
 						+ title + `</span>`;
-				if (((state === 'summary' || state ==='summary_partial') && node.replace && node.replace.length) || (node._children && node._children.length)) {
+				var shouldExpand = ((state === 'summary' || state === 'summary_partial') && node.replace && node.replace.length) || (node._children && node._children.length);
+				if (shouldExpand) {
 					outline += '<span id="down-arrow">&#9660</span>';
 				}
 				outline += `</div>`;
-				outline += createOutlineInsideString(d.children[i], '', depth=depth+1);
+				outline += createOutlineInsideString(d.children[i], '', depth+1, shouldExpand);
 				outline += `</div>`;
 			outline += `</div>`;
 		}
-		outline += `</div>`;
 	}
-	// else if (d.replace && d.replace.length) {
-	// 	// todo: default to collapsed
-	// 	outline += `<div class="list-group nested-sortable">`;
-	// 	for (var i=0; i<d.replace.length; i++) {
-	// 		let title = d.replace[i].summary? d.replace[i].summary.substring(0,20) : d.replace[i].name.substring(0,20);
-	// 		let state = getState(d.replace[i]);
-	// 		outline += `<div class="list-group-item">`
-	// 				+ `<div class="outline-item" id=${d.replace[i].d_id}>`
-	// 				+ `<span class="marker m-${state}" id="marker-${d.replace[i].d_id}">&#183</span>`
-	// 				+ `<span class="outline-text t-${state}" id="outline-text-${d.replace[i].d_id}">`
-	// 				+ title + `</span></div>`;
-	// 		outline += createOutlineInsideString(d.replace[i]);
-	// 		outline += `</div>`;
-	// 	}
-	// 	outline += `</div>`;
-	// }
+	if (noArrow) outline += `</div>`;
 	return outline
 }
 
 function createOutlineString(d) {
 	var title = $('#wikum-title').clone().children().remove().end().text();
 	var outlineString = '<div id="nestedOutline" class="list-group col nested-sortable">';
-	outlineString += `<div id='viewAll'><div class='outline-title' id='outline-text-viewAll'>${title}`;
+	outlineString += `<div id='viewAll' class='outline-title outline-item'><div class='outline-title' id='outline-text-viewAll'>${title}`;
 	outlineString += `</div></div>`;
 	outlineString += createOutlineInsideString(d);
 	outlineString += '</div>';
@@ -3679,7 +4144,9 @@ function update(d) {
 		outline_item = $('.outline-item#' + d.d_id);
 	}
 	let children = $(outline_item).next();
-	var inside_string = createOutlineInsideString(d);
+	let state = getState(d);
+	var shouldExpand = ((state === 'summary' || state === 'summary_partial') && d.replace && d.replace.length) || (d._children && d._children.length);
+	var inside_string = createOutlineInsideString(d, '', d.depth, shouldExpand);
 	if (children && children.length) {
 		children_group = children[0];
 		$(children_group).replaceWith(inside_string);
@@ -3689,8 +4156,11 @@ function update(d) {
 			$($(outline_item).parent().get(0)).append(inside_string);
 		}
 	}
+	$('#marker-' + d.d_id).removeClass();
+	$('#marker-' + d.d_id).addClass('marker m-' + state);
 	nodes_all = update_nodes_all(nodes_all[0]);
-	setSortables();
+	if (typeof isSortable == 'undefined') isSortable = !nodes_all[0].drag_locked;
+	setSortables(!isSortable);
 }
 
 function is_click() {
@@ -3819,19 +4289,125 @@ function toggle_original(id) {
 	$('#orig_' + id).toggle();
 }
 
+function subscribe_edit(did, is_replace_node, not_hidden) {
+	subscribe_edit_comments.push(did.toString());
+	var csrf = $('#csrf').text();
+	var data = {csrfmiddlewaretoken: csrf,
+				id: did};
+	$.ajax({
+		type: 'POST',
+		url: '/subscribe_comment_edit',
+		data: data,
+		success: function(res) {
+			$('#subscribe-buttons-' + did).html(render_subscribe_buttons(did, is_replace_node, not_hidden));
+		}
+	});
+}
+
+function subscribe_replies(did, is_replace_node, not_hidden) {
+	subscribe_replies_comments.push(did.toString());
+	var csrf = $('#csrf').text();
+	var data = {csrfmiddlewaretoken: csrf,
+				id: did};
+	$.ajax({
+		type: 'POST',
+		url: '/subscribe_comment_replies',
+		data: data,
+		success: function(res) {
+			$('#subscribe-buttons-' + did).html(render_subscribe_buttons(did, is_replace_node, not_hidden));
+		}
+	});
+}
+
+function unsubscribe_edit(did, is_replace_node, not_hidden) {
+	const index = subscribe_edit_comments.indexOf(did.toString());
+	if (index > -1) {
+		subscribe_edit_comments.splice(index, 1);
+	}
+	var csrf = $('#csrf').text();
+	var data = {csrfmiddlewaretoken: csrf,
+				id: did};
+	$.ajax({
+		type: 'POST',
+		url: '/unsubscribe_comment_edit',
+		data: data,
+		success: function(res) {
+			$('#subscribe-buttons-' + did).html(render_subscribe_buttons(did, is_replace_node, not_hidden));
+		}
+	});
+}
+
+function unsubscribe_replies(did, is_replace_node, not_hidden) {
+	const index = subscribe_replies_comments.indexOf(did.toString());
+	if (index > -1) {
+		subscribe_replies_comments.splice(index, 1);
+	}
+	var csrf = $('#csrf').text();
+	var data = {csrfmiddlewaretoken: csrf,
+				id: did};
+	$.ajax({
+		type: 'POST',
+		url: '/unsubscribe_comment_replies',
+		data: data,
+		success: function(res) {
+			$('#subscribe-buttons-' + did).html(render_subscribe_buttons(did, is_replace_node, not_hidden));
+		}
+	});
+}
+
+function render_subscribe_buttons(did, is_replace_node, not_hidden) {
+	var logged_in = $("#owner").length > 0;
+	if (!not_hidden) return '';
+	var text = '<span id="subscribe-buttons-' + did + '">';
+	var is_sub_replies = false;
+	var is_sub_edits = false;
+	if (subscribe_replies_comments.indexOf(did.toString()) > -1) is_sub_replies = true;
+	if (is_replace_node && subscribe_edit_comments.indexOf(did.toString()) > -1) is_sub_edits = true;
+	if (logged_in) {
+		if (is_replace_node) {
+			if (is_sub_edits) {
+				text += `<a onclick="unsubscribe_edit(${did}, ${is_replace_node}, ${not_hidden});">Unsubscribe To Edits</a>`;
+			} else {
+				text += `<a onclick="subscribe_edit(${did}, ${is_replace_node}, ${not_hidden});">Subscribe To Edits</a>`;
+			}
+		}
+		if (is_sub_replies) {
+			text += `<a onclick="unsubscribe_replies(${did}, ${is_replace_node}, ${not_hidden});">Unsubscribe To Replies</a>`;
+		} else {
+			text += `<a onclick="subscribe_replies(${did}, ${is_replace_node}, ${not_hidden});">Subscribe To Replies</a>`;
+		}
+	}
+	text += '</span>';
+	return text;
+}
+
+function format_time(time_string) {
+	var date = new Date(time_string.replace(/['"]+/g, ''));
+	var hours = date.getHours();
+	var minutes = date.getMinutes();
+	var ampm = hours >= 12 ? 'pm' : 'am';
+	hours = hours % 12;
+	hours = hours ? hours : 12; // the hour '0' should be '12'
+	minutes = minutes < 10 ? '0'+minutes : minutes;
+	var strTime = hours + ':' + minutes + ' ' + ampm;
+	return (date.getMonth()+1) + "/" + date.getDate() + "/" + date.getFullYear() + "  " + strTime;
+}
 
 function construct_comment(d) {
 	var text = "";
 	var summary = !!(d.summary != '' || d.extra_summary != '');
 
-	text += `<div id="comment_text_${d.id}">`;
-	text += `<span class="id_val">#${d.id}</span>`;
+	text += `<div class="comment_text" id="comment_text_${d.id}">`;
+	text += `<span class="id_val">`;
+	var formatted_time = '';
+	if (d.last_updated) formatted_time = format_time(d.last_updated);
+	text += `<span class="time_created">${formatted_time}</span>`;
 
 	if (summary) {
 		if (d.replace_node) {
-			text += `<h6 align="right">Summary`;
+			text += `Summary`;
 		} else {
-			text += `<h6 align="right">Summary`;
+			text += `Summary`;
 			text += ` of Comment by `;
 
 			highlight_authors = $('#highlight_authors').text().split(',');
@@ -3851,7 +4427,7 @@ function construct_comment(d) {
 			}
 		}
 		
-		text += `</h6><span id="flags-${d.id}" class="flags">`;
+		text += ` #${d.d_id}</span><span id="flags-${d.id}" class="flags">`;
 		var found = false;
 		if (d.rating_flag) {
 			if (d.rating_flag.neutral != 3) {
@@ -3903,49 +4479,49 @@ function construct_comment(d) {
 		highlight_authors = $('#highlight_authors').text().split(',');
 
 		if (highlight_authors.indexOf(d.author) > -1) {
-			text += `<h6 align="right">(Hidden) Comment by <span class="author" style="background-color: pink;">${d.author}</span>`;
+			text += `(Hidden) Comment by <span class="author" style="background-color: pink;">${d.author}</span>`;
 		} else {
-			text += `<h6 align="right">(Hidden) Comment by <span class="author">${d.author}</span>`;
+			text += `(Hidden) Comment by <span class="author">${d.author}</span>`;
 		}
 
 		if (d.size > 0) {
 			text += ` (${d.size} `;
 			if (d.size == 1) {
-				text += `like)</h6>`;
+				text += `like)`;
 			} else {
-				text += `likes)</h6>`;
+				text += `likes)`;
 			}
 		}
-		text += `</h6>`;
+		text += ` #${d.d_id}</span>`;
 		text += '<span class="original_comment">' + d.name + '</span>';
 	}
 
-	  else {
+	else {
 
 		highlight_authors = $('#highlight_authors').text().split(',');
 
 		if (highlight_authors.indexOf(d.author) > -1) {
-			text += `<h6 align="right">Comment by <span class="author" style="background-color: pink;">${d.author}</span>`;
+			text += `Comment by <span class="author" style="background-color: pink;">${d.author}</span>`;
 		} else {
-			text += `<h6 align="right">Comment by <span class="author">${d.author}</span>`;
+			text += `Comment by <span class="author">${d.author}</span>`;
 		}
 
 		if (d.size > 0) {
 			text += ` (${d.size} `;
 			if (d.size == 1) {
-				text += `like)</h6>`;
+				text += `like)`;
 			} else {
-				text += `likes)</h6>`;
+				text += `likes)`;
 			}
 		}
-		text += `</h6>`;
+		text += ` #${d.d_id}</span>`;
 		text += '<span class="original_comment">' + d.name + '</span>';
-			}
+	}
 
 	text += '</div>';
 
 	if (d.tags.length > 0) {
-		text += '<BR><div id="tags_' + d.id + '">Tags: ';
+		text += '<div class="tags" id="tags_' + d.id + '">Tags: ';
 		for (var i=0; i<d.tags.length; i++) {
 			if (is_dark(d.tags[i][1])) {
 				text += '<a href="/visualization_flags?id=' + article_id + '&owner=' + owner + '&filter=Tag: ' + d.tags[i][0] + '">';
@@ -3957,14 +4533,14 @@ function construct_comment(d) {
 				text += '</a>';
 			}
 		}
-		text += '</div><BR>';
+		text += '</div>';
 	} else {
-		text += '<div id="tags_' + d.id + '"></div><BR>';
+		text += '<div id="tags_' + d.id + '"></div>';
 	}
 
 	if (summary) {
 		if (d.editors && d.editors.length > 0) {
-			text +='<div class="editors">Summary edited by: ';
+			text +='<div class="editors" align="right">Summary edited by: ';
 			for (var i=0;i<d.editors.length; i++) {
 				text += d.editors[i] + ', '
 			}
@@ -3972,142 +4548,148 @@ function construct_comment(d) {
 			text += '</div>';
 		}
 		if (!d.replace_node) {
-			text += '<P>';
-			text += ' | <a onclick="toggle_original(' + d.id + ');">View Original Comment</a> | ';
+			text += `<footer align="right">`;
+			text += '<a onclick="toggle_original(' + d.id + ');">View Original Comment</a>';
 			// comment summary
-			if ($('#access_mode').attr('data-access') == "0" || $('#access_mode').attr('data-access') == "2") {
+			var data_access = $('#access_mode').attr('data-access');
+			if (data_access == "0" || data_access == "1") {
+				text += `<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>`;
+			}
+			if (data_access == "0" || data_access == "2") {
 				text += '<a ';
 				if (d.is_locked) text += 'class="disabled" ';
-				text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="edit_summarize_one" data-id="' + d.id + '">Edit Comment Summary</a> | ';
-				text += '<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="' + d.id + '" data-did="' + d.d_id +'">Delete Comment Summary</a> | ';
-				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="' + d.id + '">Evaluate Summary</a></P>';
+				text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="edit_summarize_one" data-id="' + d.id + '">Edit</a>';
+				text += '<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="' + d.id + '" data-did="' + d.d_id +'">Delete</a>';
+				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag</a>';
+				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="' + d.id + '">Evaluate</a>';
+				text += render_subscribe_buttons(d.d_id, d.replace_node, !d.hiddennode);
 			}
+			text += `</footer>`;
 			text += '<div id="orig_' + d.id + '" style="display: none;" class="original_comment">' + d.name + '</div>';
+
 		} else {
 			var data_access = $('#access_mode').attr('data-access');
-			text += `<footer>`;
+			text += `<footer align="right">`;
 			if (data_access == "0" || data_access == "1") {
 				text += `<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#reply_modal_box" data-id="${d.id}">Reply</a>`;
 			}
 			if (data_access == "0" || data_access == "2") {
 				text += `<a `;
 				if (d.is_locked) text += `class="disabled" `;
-				text += `data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit Summary</a>
-				<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete Summary</a>
-				<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#tag_modal_box" data-type="tag_one" data-id="${d.id}">Tag Summary</a>
-				<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate Summary</a>`;
+				text += `data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#summarize_multiple_modal_box" data-type="edit_summarize" data-id="${d.id}">Edit</a>
+				<a data-toggle="modal" data-backdrop="false" data-target="#confirm_delete_modal_box" data-id="${d.id}" data-did="${d.d_id}">Delete</a>
+				<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#tag_modal_box" data-type="tag_one" data-id="${d.id}">Tag</a>
+				<a data-toggle="modal" data-backdrop="false" data-did="${d.d_id}" data-target="#evaluate_summary_modal_box" data-type="evaluate_summary" data-id="${d.id}">Evaluate</a>`;
 			}
+			text += render_subscribe_buttons(d.d_id, d.replace_node, !d.hiddennode);
 			text += `</footer>`;
 		}
-	}
+	} else {
+		text += '<footer align="right">';
+		if ($('#access_mode').attr('data-access') == "0") {
+			 if (!summary && d.name.length > 300) {
+		
+				if (((!d.children || !d.children.length) && !d.replace_node) || (!d.replace_node && d.hashidden && d.children.length == d.hidconstant)) {
+					if (!d.hiddennode) {
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
+						text += '<a ';
+						if (d.is_locked) text += 'class="disabled" ';
+						text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+					}
+				} else if (!d.replace_node) {
+					if (!d.hiddennode) {
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" -type="tag_one" data-id="' + d.id + '">Reply</a>';
 
-	if ($('#access_mode').attr('data-access') == "0") {
-		 if (!summary && d.name.length > 300) {
-			text += '<footer>';
-	
-			if (((!d.children || !d.children.length) && !d.replace_node) || (!d.replace_node && d.hashidden && d.children.length == d.hidconstant)) {
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+						if (!(d.parent && d.parent.replace_node)) {
+							text += '<a ';
+							if (d.is_locked) text += 'class="disabled" ';
+							text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
+						}
+
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
+						text += '<a ';
+						if (d.is_locked) text += 'class="disabled" ';
+						text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+					}
 				}
 			} else if (!d.replace_node) {
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" -type="tag_one" data-id="' + d.id + '">Reply</a>';
-				}
-				if (!(d.parent && d.parent.replace_node)) {
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
-				}
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+				if ((!d.children || !d.children.length) || (d.hashidden && d.children.length == d.hidconstant)) {
+					if (!d.hiddennode) {
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+					}
+				} else {
+					if (!d.hiddennode) {
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
+						if (!(d.parent && d.parent.replace_node)) {
+							text += '<a ';
+							if (d.is_locked) text += 'class="disabled" ';
+							text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
+						}
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+					}
 				}
 			}
-			text += '</footer>';
-		} else if (!d.replace_node) {
-			text += '<footer>';
-			if ((!d.children || !d.children.length) || (d.hashidden && d.children.length == d.hidconstant)) {
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
-				}
-			} else {
+
+		}
+		else if ($('#access_mode').attr('data-access') == "1") {
+			if (!d.replace_node && !d.hiddennode) {
 				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
-				if (!(d.parent && d.parent.replace_node)) {
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
-				}
-				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
-				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
 			}
-			text += '</footer>';
 		}
-
-	}
-	else if ($('#access_mode').attr('data-access') == "1") {
-		if (!d.replace_node) {
-			text += '<footer>';
-			text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#reply_modal_box" data-type="" data-id="' + d.id + '">Reply</a>';
-			text += '</footer>';
-		}
-	}
-	else if ($('#access_mode').attr('data-access') == "2") {
-		if (!summary && d.name.length > 300) {
-			text += '<footer>';
-	
-			if (((!d.children || !d.children.length) && !d.replace_node) || (!d.replace_node && d.hashidden && d.children.length == d.hidconstant)) {
-				if (!d.hiddennode) {
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+		else if ($('#access_mode').attr('data-access') == "2") {
+			if (!summary && d.name.length > 300) {
+		
+				if (((!d.children || !d.children.length) && !d.replace_node) || (!d.replace_node && d.hashidden && d.children.length == d.hidconstant)) {
+					if (!d.hiddennode) {
+						text += '<a ';
+						if (d.is_locked) text += 'class="disabled" ';
+						text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+					}
+				} else if (!d.replace_node) {
+					if (!d.hiddennode) {
+						if (!(d.parent && d.parent.replace_node)) {
+							text += '<a ';
+							if (d.is_locked) text += 'class="disabled" ';
+							text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
+						}
+					
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
+						text += '<a ';
+						if (d.is_locked) text += 'class="disabled" ';
+						text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+					}
 				}
 			} else if (!d.replace_node) {
-				if (!(d.parent && d.parent.replace_node)) {
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
-				}
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_modal_box" data-type="summarize_one" data-id="' + d.id + '">Summarize Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+				if ((!d.children || !d.children.length) || (d.hashidden && d.children.length == d.hidconstant)) {
+					if (!d.hiddennode) {
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
+					}
+				} else {
+					if (!d.hiddennode) {
+						if (!(d.parent && d.parent.replace_node)) {
+							text += '<a ';
+							if (d.is_locked) text += 'class="disabled" ';
+							text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
+						}
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
+						text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
+					}
 				}
 			}
-			text += '</footer>';
-		} else if (!d.replace_node) {
-			text += '<footer>';
-			if ((!d.children || !d.children.length) || (d.hashidden && d.children.length == d.hidconstant)) {
-				if (!d.hiddennode) {
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
-					text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_comment" data-id="' + d.id + '">Mark Unimportant</a>';
-				}
-			} else {
-				if (!(d.parent && d.parent.replace_node)) {
-					text += '<a ';
-					if (d.is_locked) text += 'class="disabled" ';
-					text += 'data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#summarize_multiple_modal_box" data-type="summarize" data-id="' + d.id + '">Summarize Comment + Replies</a>';
-				}
-				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#hide_modal_box" data-type="hide_replies" data-id="' + d.id + '">Mark Replies Unimportant</a>';
-				text += '<a data-toggle="modal" data-backdrop="false" data-did="' + d.d_id + '" data-target="#tag_modal_box" data-type="tag_one" data-id="' + d.id + '">Tag Comment</a>';
-			}
-			text += '</footer>';
 		}
+		text += render_subscribe_buttons(d.d_id, d.replace_node, !d.hiddennode);
+		text += '</footer>';
 	}
-
 	return text;
 }
 
@@ -4195,10 +4777,12 @@ function highlight_link(from_id, to_id) {
 function show_parent(id) {
 	d = nodes_all[id-1];
 	unextra_highlight_node(id);
-	parent = d.parent;
-	highlight_node(parent.id);
-	highlight_link(parent.id, id);
-	show_text('clicked');
+	// parent = d.parent;
+	// highlight_node(parent.id);
+	// highlight_link(parent.id, id);
+	show_text(d.parent);
+	var outlineItem = $('.outline-item#' + d.parent.d_id);
+	redOutlineBorder(outlineItem);
 }
 
 function show_text(d) {
@@ -4297,19 +4881,24 @@ function show_text(d) {
 	}
 
 	var delay=500, setTimeoutConst;
+	var hoverDelay=1000, markReadHoverTimer;
 	$('.comment_box').hover(
 		  function() {
 		    var did = parseInt(this.dataset.did);
 		    var id = parseInt(this.id.substring(8));
 		    extra_highlight_node(did, id);
 		    setTimeoutConst = setTimeout(function() {
-				$('#viz').scrollTo('#outline-text-' + did, 500);
+				$('#viz').scrollTo('#outline-text-' + did, 500, {axis: 'y', offset: {top: -100}});
 			}, delay);
+			markReadHoverTimer = setTimeout(function() {
+				mark_comments_read([did]);
+			}, hoverDelay);
 		  }, function() {
 		    var did = parseInt(this.dataset.did);
 		    var id = parseInt(this.id.substring(8));
 		    unextra_highlight_node(did, id);
 		    clearTimeout(setTimeoutConst);
+		    clearTimeout(markReadHoverTimer);
 		  }
 	);
 
@@ -4426,9 +5015,9 @@ function construct_box_top(objs) {
 
 	var text = '';
 	if (accepted && count > 1 && !parent_node.replace_node) {
-		text += '<BR> <a class="btn btn-xs btn-info" data-toggle="modal" data-backdrop="false" data-target="#summarize_multiple_modal_box" data-type="summarize_selected">Summarize + Group Selected</a><BR>';
+		text += '<BR> <a class="btn btn-xs btn-info" data-toggle="modal" data-backdrop="false" data-target="#summarize_multiple_modal_box" data-type="summarize_selected">Summarize</a><BR>';
 	}
-	if (accepted || accepted2) {
+	if (accepted) {
 		text += '<a class="btn btn-xs btn-info" data-toggle="modal" data-backdrop="false" data-target="#hide_modal_box" data-type="hide_all_selected">Hide selected</a><BR>';
 	}
 	text += '<a class="btn btn-xs btn-info" data-toggle="modal" data-backdrop="false" data-target="#tag_modal_box" data-type="tag_selected">Tag Selected</a>';
@@ -4454,8 +5043,11 @@ function set_expand_position(d) {
 	var bbox;
 	if (d.article) {
 		bbox = $('.outline-item#viewAll').get(0).getBoundingClientRect();
-	} else {
-		bbox = $('.outline-item#' + d.d_id).get(0).getBoundingClientRect();
+	} else if (d.d_id) {
+		let item = $('.outline-item#' + d.d_id);
+		if (item) {
+			bbox = item.get(0).getBoundingClientRect();
+		}
 	}
 	var width = $('#expand').width();
 	var node_width = 0;
@@ -4470,7 +5062,7 @@ function set_expand_position(d) {
 
 function showdiv(d) {
 	if (!isMouseDown) {
-		if (d.replace_node) {
+		if (d && d.replace_node) {
 			clearTimeout(timer);
 
 			text = '';
@@ -4667,10 +5259,35 @@ function mark_children_summarized(d) {
 			mark_children_summarized(d.children[i]);
 		}
 	}
+	if (d._children) {
+		for (var i=0; i<d._children.length; i++) {
+			d._children[i].summarized = true;
+			mark_children_summarized(d._children[i]);
+		}
+	}
 	if (d.replace) {
 		for (var i=0; i<d.replace.length; i++) {
 			d.replace[i].summarized = true;
 			mark_children_summarized(d.replace[i]);
+		}
+	}
+}
+
+function mark_children_unsummarized(d) {
+	if (!d.replace_node) {
+		d.summarized = false;
+		d.collapsed = false;
+	}
+	if (d.children) {
+		for (var i=0; i<d.children.length; i++) {
+			if (!d.replace_node) d.children[i].summarized = false;
+			mark_children_unsummarized(d.children[i]);
+		}
+	}
+	if (d._children) {
+		for (var i=0; i<d._children.length; i++) {
+			if (!d.replace_node) d._children[i].summarized = false;
+			mark_children_unsummarized(d._children[i]);
 		}
 	}
 }
@@ -4950,7 +5567,7 @@ function redOutlineBorder(element) {
 	$(child).children('.list-countainer').each(function () {
 		$(this).children('.list-group-line').addClass('outline-selected');
 	});
-	
+	lastClicked = $(element).children('.outline-text')[0];
 }
 
 function color(d) {

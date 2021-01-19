@@ -7,18 +7,15 @@ var highlighted_text = null;
 var highlighted_comm = null;
 var highlight_text = null;
 var ctrlIsPressed = false;
-var lastClicked = null;
 var clicked_dids = {};
 var article_id = $('#article_id').text();
 
 /* Outline View Visualization */
 
 $(document).keydown(function(evt) {
-    if (evt.ctrlKey || evt.metaKey) {
+    if (evt.which == "17" || evt.metaKey) {
     	ctrlIsPressed = true;
     	clicked_dids = {};
-    } else {
-    	ctrlIsPressed = false;
     }
 });
 
@@ -27,6 +24,10 @@ $(document).keyup(function(evt){
     	ctrlIsPressed = false;
     }
 });
+
+window.onblur = function() {
+	ctrlIsPressed = false;
+}
 
 document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
@@ -42,11 +43,7 @@ article_url = article_url.replace('#','%23');
 
 var sort = getParameterByName('sort');
 if (!sort) {
-	if (article_url.indexOf('wikipedia.org') !== -1) {
-		sort = "id";
-	} else {
-		sort = "likes";
-	}
+	sort = "default";
 }
 var next = parseInt(getParameterByName('next'));
 if (!next) {
@@ -89,18 +86,55 @@ $('#menu-view').children().eq(4).children().first().attr('href', article_id);
 
 make_username_typeahead();
 
-$.ajax({type: 'GET',	
+$.ajax({type: 'GET',
 	url: `/viz_data?id=${article_id}&sort=${sort}&next=${next}&filter=${filter}&owner=${owner}`,	
 	success: function(flare) {
+		// $('.comment-unread').map(function(){return this.id.substring(13);}).get();
+		if (flare['comments_read'] == 'all') {
+			read_list = [];
+		} else {
+			read_list = flare['comments_read'];
+		}
+		subscribe_edit_comments = flare['sub_edits'];
+		subscribe_replies_comments = flare['sub_replies'];
 		var outline = createOutlineString(flare);
 		document.getElementById("outline").innerHTML = outline;
 		setSortables();
 
 		redOutlineBorder(document.getElementById("viewAll"));
+		isSortable = !flare.drag_locked;
 
 		nodes_all = update_nodes_all(flare);
+		for (var i = 0; i < nodes_all.length; i++) {
+			let child = nodes_all[i];
+			if ($('#marker-' + child.d_id).hasClass('m-summary_partial')) {
+				show_replace_nodes(child.id);
+			}
+		}
 		show_text(nodes_all[0]);
 		make_progress_bar();
+		load_permalink();
+
+		count = 0;
+		if (nodes_all[0].children) {
+			count += nodes_all[0].children.length;
+			count += nodes_all[0].hid.length;
+		}
+		
+		var text = '';
+		if (next > 0) {
+			var prev = next - 1;
+		  var url = "/visualization_flags?id=" + article_id + '&owner=' + owner + '&sort=' + sort + '&colorby=' + colorby  +'&filter=' + filter +  '&next=';
+		   text += '<a id="prev_page" class="btn btn-xs btn-primary" href="' +url + prev + '">&lt;&lt; Prev Page</a> ';
+		
+		}
+		if (count == 30) {
+			var next_sub = next + 1;
+		  var url = "/visualization_flags?id=" + article_id + '&owner=' + owner + '&sort=' + sort + '&colorby=' + colorby  +'&filter=' + filter + '&next=';
+		  text += ' <a id="next_page" class="btn btn-xs btn-primary" href="' +url + next_sub + '">Next Page &gt;&gt;</a>';
+		 
+		}
+		 $('#paginate').html(text);
 
 		$('body').on('mouseenter', '.marker', function() {
 			// hover gray background text
@@ -114,11 +148,12 @@ $.ajax({type: 'GET',
 
 		// .outline-text functions
 		var delay=500, setTimeoutConst;
-		$('body').on('mouseenter', '.outline-text', function() {
+		var hoverOutlineDelay=1500, markReadHoverOutlineTimer;
+		$('body').on('mouseenter', '.outline-text, #outline-text-viewAll', function() {
 			// circle marker in red
 			$(this).prev().addClass('outline-hover');
-			// highlight associated comment box
 			let did = this.id.substring(13);
+			// highlight associated comment box
 			if (did === 'viewAll') {
 				setTimeoutConst = setTimeout(function() {
 					$('#box').animate({scrollTop: 0}, 500);
@@ -130,7 +165,9 @@ $.ajax({type: 'GET',
 					setTimeoutConst = setTimeout(function() {
 						$("#box").scrollTo("#" + comment_box[0].id, 500);
 					}, delay);
-					
+					markReadHoverOutlineTimer = setTimeout(function() {
+						mark_comments_read([did]);
+					}, hoverOutlineDelay);
 				}
 			}
 		});
@@ -140,6 +177,7 @@ $.ajax({type: 'GET',
 			$(this).prev().removeClass('outline-hover');
 			// highlight associated comment box
 			let did = this.id.substring(13);
+			clearTimeout(markReadHoverOutlineTimer);
 			if (did === 'viewAll') {
 				clearTimeout(setTimeoutConst);
 			} else {
@@ -154,10 +192,12 @@ $.ajax({type: 'GET',
 
 		$('body').on('click', '#down-arrow', function(evt) {
 			var outlineItem = $(this).parent()[0];
-			var child = $(this).parent().next()[0];
 			let id = outlineItem.id;
 			var d = id === 'viewAll' ? nodes_all[0] : nodes_all.filter(o => o.d_id == id)[0];
-	    	if (child) {
+	    	if (d.replace && d.replace.length) {
+	    		expand(d);
+	    	}
+	    	else if (d.children && d.children.length) {
 	    		collapse(d);
 	    	}
 	    	else {
@@ -169,9 +209,11 @@ $.ajax({type: 'GET',
 			var selectGroup = $(this).closest('.list-group-item').children(":first").get(0);
 			d = selectGroup ? nodes_all.filter(o => o.d_id == selectGroup.id)[0] : nodes_all[0];
 			var outlineText = $(selectGroup).children('.outline-text')[0];
-			var child = $(selectGroup).next().get(0);
 			if (lastClicked === outlineText) {
-	    		if (child) {
+	    		if (d.replace && d.replace.length) {
+		    		expand(d);
+		    	}
+		    	else if (d.children && d.children.length) {
 		    		collapse(d);
 		    	}
 		    	else {
@@ -201,10 +243,11 @@ $.ajax({type: 'GET',
 		$('body').on('click', '.outline-text, .marker', function(evt) {
 			var parent = $(this).parent();
 			var outlineText = $(this).parent().children('.outline-text')[0];
+			var did = outlineText.id.substring(13);
+			mark_comments_read([did]);
 		    if (ctrlIsPressed) {
 		    	$('.rb-red').removeClass('rb-red');
 		    	$('.outline-selected').removeClass('outline-selected');
-		    	let did = outlineText.id.substring(13);
 		    	if (did !== 'viewAll') {
 		    		let outlineItem = $(outlineText).parent()[0];
 			    	if (!(did in clicked_dids)) {
@@ -219,8 +262,8 @@ $.ajax({type: 'GET',
 
 			    for (const did in clicked_dids) {
 			    	if (clicked_dids[did] === 1) {
-			    		$('.outline-item#' + did).addClass('rb-red');
-			    		/* outline the circle */
+			    		$('.outline-item#' + did).addClass('rb-red');	
+						/* outline the circle */
 						$('#marker-' + did).addClass('outline-selected');
 			    	}
 			    }
@@ -230,12 +273,14 @@ $.ajax({type: 'GET',
 		      	}
 		    } else {
 		    	var outlineItem = $(outlineText).parent()[0];
-			    var child = $(outlineText).parent().next()[0];
 			    // show only this item and children (subtree)
 				let id = outlineText.id.substring(13);
 			    d = id === 'viewAll' ? nodes_all[0] : nodes_all.filter(o => o.d_id == id)[0];
 		    	if (lastClicked === outlineText) {
-		    		if (child) {
+		    		if (d.replace && d.replace.length) {
+			    		expand(d);
+			    	}
+		    		else if (d.children && d.children.length) {
 			    		collapse(d);
 			    	}
 			    	else {
@@ -277,7 +322,7 @@ $.ajax({type: 'GET',
 		// viz functions
 		$('#viz').on('click', function(evt) {
 			if (!($(evt.target).hasClass('list-group-line') || $(evt.target).hasClass('list-group-item') || $(evt.target).hasClass('outline-item') || $(evt.target).hasClass('outline-text') || $(evt.target).hasClass('marker'))) {
-				redOutlineBorder($('#outline').children(":first").children('.list-group'));
+				redOutlineBorder($('.outline-item#viewAll'))
 				show_text(nodes_all[0]);
 				lastClicked = $('#outline-text-viewAll');
 			}
@@ -290,18 +335,20 @@ $.ajax({type: 'GET',
 
 function make_dropdown() {
 	var sort_num = 0;
-	if (sort == "likes") {
+	if (sort == "id") {
 		sort_num = 1;
-	} else if (sort == "replies") {
+	} else if (sort == "likes") {
 		sort_num = 2;
-	} else if (sort == "long") {
+	} else if (sort == "replies") {
 		sort_num = 3;
-	} else if (sort == "short") {
+	} else if (sort == "long") {
 		sort_num = 4;
-	} else if (sort == "newest") {
+	} else if (sort == "short") {
 		sort_num = 5;
-	} else if (sort == "oldest") {
+	} else if (sort == "newest") {
 		sort_num = 6;
+	} else if (sort == "oldest") {
+		sort_num = 7;
 	}
 
 	$('#menu-sort').children().eq(sort_num).css({'background-color': '#42dca3'});
@@ -312,13 +359,14 @@ function make_dropdown() {
 	});
 
 	var url = "/visualization_flags?id=" + article_id + '&filter=' + filter + '&owner=' + owner + '&colorby=' + colorby  + '&sort=';
-	$('#menu-sort').children().eq(0).children().first().attr('href', String(url + 'id'));
-	$('#menu-sort').children().eq(1).children().first().attr('href', String(url + 'likes'));
-	$('#menu-sort').children().eq(2).children().first().attr('href', String(url + 'replies'));
-	$('#menu-sort').children().eq(3).children().first().attr('href', String(url + 'long'));
-	$('#menu-sort').children().eq(4).children().first().attr('href', String(url + 'short'));
-	$('#menu-sort').children().eq(5).children().first().attr('href', String(url + 'newest'));
-	$('#menu-sort').children().eq(6).children().first().attr('href', String(url + 'oldest'));
+	$('#menu-sort').children().eq(0).children().first().attr('href', String(url + 'default'));
+	$('#menu-sort').children().eq(1).children().first().attr('href', String(url + 'id'));
+	$('#menu-sort').children().eq(2).children().first().attr('href', String(url + 'likes'));
+	$('#menu-sort').children().eq(3).children().first().attr('href', String(url + 'replies'));
+	$('#menu-sort').children().eq(4).children().first().attr('href', String(url + 'long'));
+	$('#menu-sort').children().eq(5).children().first().attr('href', String(url + 'short'));
+	$('#menu-sort').children().eq(6).children().first().attr('href', String(url + 'newest'));
+	$('#menu-sort').children().eq(7).children().first().attr('href', String(url + 'oldest'));
 }
 
 function make_color() {

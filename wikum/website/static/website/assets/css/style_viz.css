@@ -52,7 +52,10 @@ h5{
     font-size: 18px;
 }
 h6{
-    font-size:16px;
+    font-size: 14px;
+    line-height: 12px;
+    font-weight: 400;
+    margin-top: 17px;
 }
 a{
     transition: all 0.4s ease;
@@ -1150,7 +1153,7 @@ Footer
 }
 footer{
     color: #fff;
-    background-color:#191b1f;
+    /*background-color:#191b1f;*/
 }
 .footer-top{
     padding: 60px 0 40px;

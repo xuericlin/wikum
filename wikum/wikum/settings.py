@@ -91,7 +91,13 @@ INSTALLED_APPS = [
     'website',
     'tracking',
     'account',
+    "pinax.notifications",
+    "bootstrapform",
+    "pinax.templates",
 ]
+
+LOGIN_URL = '/account/login/'
+LOGOUT_REDIRECT_URL = '/account/login/'
 
 SITE_ID = 1
 
@@ -111,14 +117,30 @@ MIDDLEWARE = [
     
 ]
 
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+
+DEFAULT_FROM_EMAIL = 'wikum.notifications@gmail.com'
+
+EMAIL_USE_TLS = True
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_HOST_USER = 'wikum.notifications@gmail.com'
+EMAIL_HOST_PASSWORD = 'WikumHaystack'
+EMAIL_PORT = 587
+
+PINAX_NOTIFICATIONS_QUEUE_ALL=True
+
+PINAX_NOTIFICATIONS_BACKENDS = [
+    ("email", "pinax.notifications.backends.email.EmailBackend"),
+]
 
 ROOT_URLCONF = 'wikum.urls'
 
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [
+            BASE_DIR + 'website/templates/',
+        ],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -146,7 +168,7 @@ DATABASES = {
         'PASSWORD': MYSQL["PASSWORD"],# Not used with sqlite3.
         'HOST': MYSQL["HOST"], # Set to empty string for localhost. Not used with sqlite3.
         'PORT': '', # Set to empty string for default. Not used with sqlite3.
-        'STORAGE_ENGINE': 'MyISAM'
+        'STORAGE_ENGINE': 'MyISAM / INNODB / ETC'
     }
 }
 
@@ -193,13 +215,13 @@ LANGUAGE_CODE = 'es'
 
 from django.utils.translation import ugettext_lazy as _
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/New_York'
 
 USE_I18N = True
 
 USE_L10N = True
 
-USE_TZ = True
+USE_TZ = False
 
 
 TRACK_AJAX_REQUESTS = True

@@ -21,6 +21,7 @@ $ sudo apt-get update
 * Set up the database
 * Set up configurations
 * Set up schemas and fixtures
+* Start the RabbitMQ server
 
 The `requirements.txt` should have already given you [WhiteNoise](http://whitenoise.evans.io/en/stable/django.html), so now in order to [render static files](https://docs.djangoproject.com/en/2.2/howto/static-files/), run:
 ```sh
@@ -47,16 +48,27 @@ $ sudo update-rc.d redis_6379 enable
 ```
 
 ### Using supervisor
-The `wikum/wikum/supervisord.conf` file keeps all of our processes running. It will retry some processes if they fail.
-Note that you will also need a `wikum/wikum/supervisor.sock` file.
-Restart it with:
+We use supervisor to manage our server (Daphne) and worker (Celery) processes. The `wikum/wikum/supervisord.conf` stores configuration information for all the processes. Supervisor uses this conf file to run and log the processes. It will retry processes if they fail.
+Note that to run supervisor, you will also need a `wikum/wikum/supervisor.sock` file.
+Restart all processes currently supervised by supervisor with:
 ```sh
 $ sudo supervisorctl restart all
 ```
-If you've updated your config, you need to reread, update, and start the processes:
+If you've updated the configuration file at all, you need to reread, update, and start the processes again:
 ```sh
 $ sudo supervisorctl reread
 $ sudo supervisorctl update
 $ sudo supervisorctl start <your_process>
 ```
 
+### Setting up cron jobs
+We use [pinax-notifications](https://github.com/pinax/pinax-notifications) for our notification system. Set up a log file (we have ours in /var/log/cron_mail.log). Make sure that the notification scripts are executable:
+```sh
+$ sudo chmod +x /wikum/wikum/wikum/cron/emit_notices.sh
+$ sudo chmod +x /wikum/wikum/wikum/cron/retry_deferred.sh
+```
+To `emit_notices` every minute and `retry_deferred` every 20 minutes, set up a cron job using `crontab -e`:
+```sh
+$ * * * * * sudo /wikum/wikum/wikum/cron/emit_notices.sh
+$ 0,20,40 * * * * sudo /wikum/wikum/wikum/cron/retry_deferred.sh
+```
